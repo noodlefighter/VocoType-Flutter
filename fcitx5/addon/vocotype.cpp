@@ -25,30 +25,33 @@
 
 namespace {
 
-std::string stopRecorderProcess(pid_t pid, int stdin_fd, FILE* stdout_file) {
-    if (stdin_fd >= 0) {
-        close(stdin_fd);
+std::string readRecorderLineFromFd(int fd) {
+    if (fd < 0) {
+        return {};
     }
-
     std::string audio_path;
-    if (stdout_file) {
-        char buffer[1024];
-        if (fgets(buffer, sizeof(buffer), stdout_file) != nullptr) {
-            audio_path = buffer;
-            while (!audio_path.empty() &&
-                   (audio_path.back() == '\n' || audio_path.back() == '\r')) {
-                audio_path.pop_back();
+    bool started = false;
+    char ch = '\0';
+    while (true) {
+        ssize_t n = read(fd, &ch, 1);
+        if (n == 0) {
+            break;
+        }
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
             }
+            return {};
         }
-        fclose(stdout_file);
-    }
-
-    if (pid > 0) {
-        int status = 0;
-        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+        if (ch == '\n' || ch == '\r') {
+            if (!started) {
+                continue;
+            }
+            break;
         }
+        started = true;
+        audio_path.push_back(ch);
     }
-
     return audio_path;
 }
 
@@ -83,17 +86,7 @@ VoCoTypeAddon::VoCoTypeAddon(fcitx::Instance* instance)
 }
 
 VoCoTypeAddon::~VoCoTypeAddon() {
-    if (recorder_pid_ > 0 || recorder_stdout_ || recorder_stdin_fd_ >= 0) {
-        std::string audio_path =
-            stopRecorderProcess(recorder_pid_, recorder_stdin_fd_, recorder_stdout_);
-        if (!audio_path.empty()) {
-            std::remove(audio_path.c_str());
-        }
-        recorder_pid_ = -1;
-        recorder_stdin_fd_ = -1;
-        recorder_stdout_ = nullptr;
-        is_recording_ = false;
-    }
+    terminateRecorderProcess();
     FCITX_INFO() << "VoCoType Addon destroyed";
 }
 
@@ -214,23 +207,60 @@ void VoCoTypeAddon::startRecording(fcitx::InputContext* ic) {
     if (is_recording_) {
         return;
     }
+    if (recorder_busy_.load()) {
+        showError(ic, "录音处理中，请稍候");
+        return;
+    }
 
     if (python_venv_path_.empty() || recorder_script_path_.empty()) {
         showError(ic, "录音配置无效");
         return;
     }
 
+    if (!ensureRecorderRunning(ic)) {
+        return;
+    }
+
+    if (!sendRecorderCommand("START\n")) {
+        terminateRecorderProcess();
+        showError(ic, "启动录音失败");
+        return;
+    }
+
+    is_recording_ = true;
+
+    // 显示录音状态
+    auto& inputPanel = ic->inputPanel();
+    fcitx::Text preedit;
+    preedit.append("🎤 录音中...");
+    inputPanel.setClientPreedit(preedit);
+    ic->updatePreedit();
+    ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
+
+    FCITX_INFO() << "Recording started";
+}
+
+bool VoCoTypeAddon::ensureRecorderRunning(fcitx::InputContext* ic) {
+    if (recorder_pid_ > 0 && recorder_stdout_fd_ >= 0 && recorder_stdin_fd_ >= 0) {
+        int status = 0;
+        pid_t result = waitpid(recorder_pid_, &status, WNOHANG);
+        if (result == 0) {
+            return true;
+        }
+        terminateRecorderProcess();
+    }
+
     int stdin_pipe[2];
     int stdout_pipe[2];
     if (pipe(stdin_pipe) != 0) {
         showError(ic, "启动录音失败");
-        return;
+        return false;
     }
     if (pipe(stdout_pipe) != 0) {
         close(stdin_pipe[0]);
         close(stdin_pipe[1]);
         showError(ic, "启动录音失败");
-        return;
+        return false;
     }
 
     pid_t pid = fork();
@@ -240,7 +270,7 @@ void VoCoTypeAddon::startRecording(fcitx::InputContext* ic) {
         close(stdout_pipe[0]);
         close(stdout_pipe[1]);
         showError(ic, "启动录音失败");
-        return;
+        return false;
     }
 
     if (pid == 0) {
@@ -255,6 +285,7 @@ void VoCoTypeAddon::startRecording(fcitx::InputContext* ic) {
         execl(python_venv_path_.c_str(),
               python_venv_path_.c_str(),
               recorder_script_path_.c_str(),
+              "--loop",
               static_cast<char*>(nullptr));
         _exit(127);
     }
@@ -262,30 +293,18 @@ void VoCoTypeAddon::startRecording(fcitx::InputContext* ic) {
     close(stdin_pipe[0]);
     close(stdout_pipe[1]);
 
-    FILE* stdout_file = fdopen(stdout_pipe[0], "r");
-    if (!stdout_file) {
-        close(stdout_pipe[0]);
+    if (stdout_pipe[0] < 0) {
         close(stdin_pipe[1]);
         kill(pid, SIGTERM);
         waitpid(pid, nullptr, 0);
         showError(ic, "启动录音失败");
-        return;
+        return false;
     }
 
     recorder_pid_ = pid;
     recorder_stdin_fd_ = stdin_pipe[1];
-    recorder_stdout_ = stdout_file;
-    is_recording_ = true;
-
-    // 显示录音状态
-    auto& inputPanel = ic->inputPanel();
-    fcitx::Text preedit;
-    preedit.append("🎤 录音中...");
-    inputPanel.setClientPreedit(preedit);
-    ic->updatePreedit();
-    ic->updateUserInterface(fcitx::UserInterfaceComponent::InputPanel);
-
-    FCITX_INFO() << "Recording started";
+    recorder_stdout_fd_ = stdout_pipe[0];
+    return true;
 }
 
 void VoCoTypeAddon::stopAndTranscribe(fcitx::InputContext* ic) {
@@ -298,6 +317,7 @@ void VoCoTypeAddon::stopRecording(fcitx::InputContext* ic, bool transcribe) {
     }
 
     is_recording_ = false;
+    recorder_busy_.store(true);
 
     if (ic) {
         if (transcribe) {
@@ -312,19 +332,36 @@ void VoCoTypeAddon::stopRecording(fcitx::InputContext* ic, bool transcribe) {
         }
     }
 
-    pid_t pid = recorder_pid_;
     int stdin_fd = recorder_stdin_fd_;
-    FILE* stdout_file = recorder_stdout_;
-    recorder_pid_ = -1;
-    recorder_stdin_fd_ = -1;
-    recorder_stdout_ = nullptr;
+    int stdout_fd = recorder_stdout_fd_;
 
     auto ic_ref =
         ic ? ic->watch() : fcitx::TrackableObjectReference<fcitx::InputContext>();
 
-    std::thread([this, pid, stdin_fd, stdout_file, transcribe, ic_ref]() mutable {
-        std::string audio_path = stopRecorderProcess(pid, stdin_fd, stdout_file);
+    std::thread([this, stdin_fd, stdout_fd, transcribe, ic_ref]() mutable {
+        if (stdin_fd >= 0) {
+            const char* stop_cmd = "STOP\n";
+            ssize_t written = write(stdin_fd, stop_cmd, strlen(stop_cmd));
+            if (written < 0) {
+                recorder_busy_.store(false);
+                terminateRecorderProcess();
+                if (transcribe) {
+                    instance_->eventDispatcher().scheduleWithContext(
+                        ic_ref, [this, ic_ref]() {
+                            auto* ic_ptr = ic_ref.get();
+                            if (ic_ptr) {
+                                showError(ic_ptr, "录音失败");
+                            }
+                        });
+                }
+                return;
+            }
+        }
+
+        std::string audio_path = readRecorderLineFromFd(stdout_fd);
+        recorder_busy_.store(false);
         if (audio_path.empty()) {
+            terminateRecorderProcess();
             if (transcribe) {
                 instance_->eventDispatcher().scheduleWithContext(
                     ic_ref, [this, ic_ref]() {
@@ -363,6 +400,42 @@ void VoCoTypeAddon::stopRecording(fcitx::InputContext* ic, bool transcribe) {
     }).detach();
 
     FCITX_INFO() << "Recording stopped";
+}
+
+bool VoCoTypeAddon::sendRecorderCommand(const char* command) {
+    if (recorder_stdin_fd_ < 0) {
+        return false;
+    }
+    size_t len = strlen(command);
+    ssize_t written = write(recorder_stdin_fd_, command, len);
+    return written == static_cast<ssize_t>(len);
+}
+
+void VoCoTypeAddon::terminateRecorderProcess() {
+    if (recorder_pid_ <= 0 && recorder_stdout_fd_ < 0 && recorder_stdin_fd_ < 0) {
+        return;
+    }
+
+    if (recorder_stdin_fd_ >= 0) {
+        const char* quit_cmd = "QUIT\n";
+        write(recorder_stdin_fd_, quit_cmd, strlen(quit_cmd));
+        close(recorder_stdin_fd_);
+    }
+    recorder_stdin_fd_ = -1;
+
+    if (recorder_stdout_fd_ >= 0) {
+        close(recorder_stdout_fd_);
+        recorder_stdout_fd_ = -1;
+    }
+
+    if (recorder_pid_ > 0) {
+        int status = 0;
+        while (waitpid(recorder_pid_, &status, 0) < 0 && errno == EINTR) {
+        }
+        recorder_pid_ = -1;
+    }
+    is_recording_ = false;
+    recorder_busy_.store(false);
 }
 
 void VoCoTypeAddon::updateUI(fcitx::InputContext* ic, const RimeUIState& state) {

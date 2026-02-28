@@ -34,15 +34,17 @@ logger = logging.getLogger(__name__)
 
 
 class AudioRecorder:
-    """音频录制器"""
+    """音频录制器（可复用）"""
 
     def __init__(self, device: int | str | None, sample_rate: int):
         self.device = device
         self.sample_rate = sample_rate
-        self.audio_frames = []
-        self.audio_queue = queue.Queue(maxsize=500)
+        self.audio_frames: list[np.ndarray] = []
+        self.audio_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=500)
         self.stop_event = threading.Event()
-        self.stream = None
+        self.stream: sd.InputStream | None = None
+        self.capture_thread: threading.Thread | None = None
+        self.active_sample_rate: int | None = None
 
     def _resolve_input_device(self):
         """选择可用的输入设备"""
@@ -96,17 +98,22 @@ class AudioRecorder:
 
         return preferred or SAMPLE_RATE
 
-    def record(self, duration: float | None = None) -> Path:
-        """录制音频
+    def start(self) -> None:
+        """开始录音（非阻塞）"""
+        if self.stream is not None:
+            return
 
-        Args:
-            duration: 录制时长（秒），None 表示持续录制直到手动停止
+        self.audio_frames.clear()
+        while not self.audio_queue.empty():
+            try:
+                self.audio_queue.get_nowait()
+            except queue.Empty:
+                break
+        self.stop_event.clear()
 
-        Returns:
-            临时音频文件路径
-        """
         device = self._resolve_input_device()
         sample_rate = self._resolve_sample_rate(device, self.sample_rate)
+        self.active_sample_rate = sample_rate
 
         logger.info("使用设备: %s, 采样率: %d Hz", device, sample_rate)
 
@@ -121,7 +128,6 @@ class AudioRecorder:
             except queue.Full:
                 pass
 
-        # 创建音频流
         self.stream = sd.InputStream(
             samplerate=sample_rate,
             blocksize=block_size,
@@ -132,7 +138,6 @@ class AudioRecorder:
         )
         self.stream.start()
 
-        # 采集线程
         def capture_loop():
             while not self.stop_event.is_set():
                 try:
@@ -141,43 +146,42 @@ class AudioRecorder:
                 except queue.Empty:
                     continue
 
-        capture_thread = threading.Thread(target=capture_loop, daemon=True)
-        capture_thread.start()
-
+        self.capture_thread = threading.Thread(target=capture_loop, daemon=True)
+        self.capture_thread.start()
         logger.info("开始录音...")
 
-        # 如果指定了时长，等待指定时间
-        if duration:
-            self.stop_event.wait(timeout=duration)
-        else:
-            # 否则等待 stdin 输入（C++ Addon 会发送停止信号）
-            sys.stdin.read()
+    def stop(self) -> Path | None:
+        """停止录音并写入临时文件"""
+        if self.stream is None or self.active_sample_rate is None:
+            return None
 
-        # 停止录音
         self.stop_event.set()
-        self.stream.stop()
-        self.stream.close()
-        capture_thread.join(timeout=1.0)
+        try:
+            self.stream.stop()
+            self.stream.close()
+        finally:
+            self.stream = None
+
+        if self.capture_thread is not None:
+            self.capture_thread.join(timeout=1.0)
+            self.capture_thread = None
 
         logger.info("录音完成，共 %d 帧", len(self.audio_frames))
 
-        # 合并音频
         if not self.audio_frames:
             logger.error("没有录制到音频数据")
-            sys.exit(1)
+            return None
 
+        sample_rate = self.active_sample_rate
         audio_data = np.concatenate(self.audio_frames).flatten()
         audio_duration = len(audio_data) / sample_rate
         logger.info("录音时长: %.2f 秒", audio_duration)
 
-        # 检查是否太短
         if audio_duration < 0.3:
             logger.warning("录音时长过短（< 0.3 秒），可能无法识别")
 
-        # 重采样到 16kHz（FunASR 要求）
         audio_16k = resample_audio(audio_data, sample_rate, SAMPLE_RATE)
 
-        # 写入临时文件
         temp_file = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
         temp_path = Path(temp_file.name)
         temp_file.close()
@@ -187,9 +191,28 @@ class AudioRecorder:
 
         return temp_path
 
+    def record(self, duration: float | None = None) -> Path:
+        """录制音频（阻塞）"""
+        self.start()
+
+        if duration:
+            self.stop_event.wait(timeout=duration)
+        else:
+            sys.stdin.read()
+
+        path = self.stop()
+        if path is None:
+            raise RuntimeError("没有录制到音频数据")
+        return path
+
 
 def main():
     parser = argparse.ArgumentParser(description='VoCoType Audio Recorder')
+    parser.add_argument(
+        '--loop',
+        action='store_true',
+        help='Listen for START/STOP commands on stdin'
+    )
     parser.add_argument(
         '--duration',
         type=float,
@@ -216,10 +239,41 @@ def main():
     sample_rate = args.sample_rate if args.sample_rate != 44100 else configured_sr
 
     # 录音
+    if args.loop:
+        recorder: AudioRecorder | None = None
+        try:
+            for line in sys.stdin:
+                cmd = line.strip().upper()
+                if not cmd:
+                    continue
+                if cmd == "START":
+                    if recorder is None:
+                        recorder = AudioRecorder(device, sample_rate)
+                    recorder.start()
+                elif cmd == "STOP":
+                    if recorder is None:
+                        print("", flush=True)
+                        continue
+                    audio_path = recorder.stop()
+                    recorder = None
+                    print("" if audio_path is None else audio_path, flush=True)
+                elif cmd == "QUIT":
+                    if recorder is not None:
+                        recorder.stop()
+                    break
+        except KeyboardInterrupt:
+            logger.info("录音被中断")
+            sys.exit(1)
+        except Exception as exc:
+            logger.error("录音失败: %s", exc)
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+        return
+
     recorder = AudioRecorder(device, sample_rate)
     try:
         audio_path = recorder.record(duration=args.duration)
-        # 输出文件路径到 stdout（C++ Addon 会读取此路径）
         print(audio_path, flush=True)
     except KeyboardInterrupt:
         logger.info("录音被中断")

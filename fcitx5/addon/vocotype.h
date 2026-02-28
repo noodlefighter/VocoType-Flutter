@@ -17,6 +17,7 @@
 #include <memory>
 #include <string>
 #include <sys/types.h>
+#include <atomic>
 #include <vector>
 
 #include "ipc_client.h"
@@ -87,6 +88,10 @@ private:
      */
     bool isIMSwitchHotkey(const fcitx::Key& key) const;
 
+    bool ensureRecorderRunning(fcitx::InputContext* ic);
+    bool sendRecorderCommand(const char* command);
+    void terminateRecorderProcess();
+
     fcitx::Instance* instance_;
     std::unique_ptr<IPCClient> ipc_client_;
 
@@ -94,7 +99,8 @@ private:
     bool is_recording_ = false;
     pid_t recorder_pid_ = -1;
     int recorder_stdin_fd_ = -1;
-    FILE* recorder_stdout_ = nullptr;
+    int recorder_stdout_fd_ = -1;
+    std::atomic<bool> recorder_busy_{false};
 
     // Python 脚本路径（安装时配置）
     std::string python_venv_path_;
