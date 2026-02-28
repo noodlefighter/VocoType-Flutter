@@ -56,8 +56,8 @@ std::string stopRecorderProcess(pid_t pid, int stdin_fd, FILE* stdout_file) {
 
 namespace vocotype {
 
-// F9 键
-constexpr int PTT_KEYVAL = FcitxKey_F9;
+// F2 键
+constexpr int PTT_KEYVAL = FcitxKey_F2;
 
 VoCoTypeAddon::VoCoTypeAddon(fcitx::Instance* instance)
     : instance_(instance),
