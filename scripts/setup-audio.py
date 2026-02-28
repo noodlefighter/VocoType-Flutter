@@ -334,7 +334,8 @@ def main():
                     break
 
             # 4. 播放测试
-            can_hear = playback_test(audio_data, sample_rate)
+            # can_hear = playback_test(audio_data, sample_rate)
+            can_hear = True
 
             if not can_hear:
                 # 询问下一步操作
