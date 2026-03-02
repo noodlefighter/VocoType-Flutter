@@ -586,11 +586,57 @@ class FunASRServer:
             logger.debug(f"获取音频时长失败: {str(e)}")
             return 0.0
 
+    def _patch_audioread_gstreamer_backend(self):
+        """兼容 PyGObject/GStreamer 新版本对 Gst.init(None) 的限制。
+
+        audioread.gstdec 在导入时会调用 Gst.init(None)。在部分环境（如
+        PyGObject 3.50+）会抛出 TypeError，导致 librosa.load 间接失败。
+        这里在运行时禁用 audioread 的 GStreamer backend，回退到其它 backend。
+        """
+        try:
+            import audioread
+        except Exception as e:
+            logger.debug("audioread 未安装或导入失败，跳过兼容补丁: %s", e)
+            return
+
+        marker = "_vocotype_gst_backend_patched"
+        if getattr(audioread, marker, False):
+            return
+
+        try:
+            # 先探测当前环境是否会触发该兼容性错误。
+            import gi
+            gi.require_version("Gst", "1.0")
+            from gi.repository import Gst  # noqa: WPS433
+            Gst.init(None)
+            setattr(audioread, marker, True)
+            logger.debug("GStreamer 初始化兼容，无需禁用 audioread GStreamer backend")
+            return
+        except TypeError as e:
+            # 命中已知问题：Argument 1 does not allow None as a value
+            logger.warning(
+                "检测到 GStreamer 初始化兼容性问题，禁用 audioread 的 GStreamer backend: %s",
+                e,
+            )
+        except Exception:
+            # 其它错误保持原样，不强行覆盖行为。
+            setattr(audioread, marker, True)
+            return
+
+        try:
+            audioread._gst_available = lambda: False  # type: ignore[attr-defined]
+            if hasattr(audioread, "BACKENDS"):
+                audioread.BACKENDS[:] = []
+            setattr(audioread, marker, True)
+        except Exception as patch_err:
+            logger.warning("应用 audioread GStreamer 兼容补丁失败: %s", patch_err)
+
     def _warmup_librosa(self):
         """预热librosa库，避免首次load时的初始化延迟（这是真正的问题所在）"""
         try:
             logger.info("开始预热librosa，触发音频库初始化...")
             warmup_start = time.time()
+            self._patch_audioread_gstreamer_backend()
             
             import tempfile
             import numpy as np
