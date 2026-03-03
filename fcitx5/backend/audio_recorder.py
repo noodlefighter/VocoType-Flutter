@@ -26,7 +26,12 @@ import sounddevice as sd
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.audio_utils import load_audio_config, resample_audio, SAMPLE_RATE
+from app.audio_utils import (
+    load_audio_config,
+    resample_audio,
+    resolve_input_device,
+    SAMPLE_RATE,
+)
 from app.wave_writer import write_wav
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -48,25 +53,7 @@ class AudioRecorder:
 
     def _resolve_input_device(self):
         """选择可用的输入设备"""
-        if self.device is not None:
-            try:
-                info = sd.query_devices(self.device)
-                if info.get("max_input_channels", 0) > 0:
-                    return self.device
-                logger.warning("设备 %s 无输入通道，回退选择输入设备", self.device)
-            except Exception as exc:
-                logger.warning("查询设备 %s 失败: %s", self.device, exc)
-
-        try:
-            devices = sd.query_devices()
-            for idx, info in enumerate(devices):
-                if info.get("max_input_channels", 0) > 0:
-                    logger.info("回退至输入设备 #%s (%s)", idx, info.get("name", "unknown"))
-                    return idx
-        except Exception as exc:
-            logger.warning("查询输入设备列表失败: %s", exc)
-
-        return None
+        return resolve_input_device(sd, self.device)
 
     def _resolve_sample_rate(self, device, preferred):
         """选择可用采样率"""

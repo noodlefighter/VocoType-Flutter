@@ -10,6 +10,8 @@ from typing import Optional
 import numpy as np
 import sounddevice as sd
 
+from app.audio_utils import resolve_input_device
+
 
 logger = logging.getLogger(__name__)
 
@@ -100,18 +102,8 @@ class AudioCapture:
             logger.error(msg)
             raise AudioCaptureError(msg) from exc
 
-    def _fallback_device(self) -> Optional[int]:
-        try:
-            devices = sd.query_devices()
-            for idx, info in enumerate(devices):
-                if info.get("max_input_channels", 0) > 0:
-                    logger.warning(
-                        "回退至输入设备 #%s (%s)", idx, info.get("name", "unknown")
-                    )
-                    return idx
-        except Exception as exc:
-            logger.error("查询音频设备失败: %s", exc)
-        return None
+    def _fallback_device(self) -> int | str | None:
+        return resolve_input_device(sd, self.device)
 
     def _callback(self, in_data, frames, time, status):  # type: ignore[override]
         if status:
@@ -122,5 +114,3 @@ class AudioCapture:
             self._queue.put_nowait(frame.copy())
         except queue.Full:
             logger.warning("音频队列已满，丢弃音频帧")
-
-

@@ -542,6 +542,8 @@ After=graphical-session.target
 [Service]
 Type=simple
 ExecStart=$HOME/.local/bin/vocotype-fcitx5-backend
+ExecStopPost=-/usr/bin/pkill -f "$HOME/.local/share/vocotype-fcitx5/backend/audio_recorder.py"
+KillMode=mixed
 Restart=on-failure
 RestartSec=5s
 Environment="PYTHONIOENCODING=UTF-8"

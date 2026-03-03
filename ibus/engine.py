@@ -26,6 +26,7 @@ from app.audio_utils import (
     SAMPLE_RATE,
     DEFAULT_NATIVE_SAMPLE_RATE,
     load_audio_config,
+    resolve_input_device,
     resample_audio,
 )
 
@@ -93,25 +94,7 @@ class VoCoTypeEngine(IBus.Engine):
 
     def _resolve_input_device(self, sd):
         """选择可用的输入设备，优先使用显式配置。"""
-        if AUDIO_DEVICE is not None:
-            try:
-                info = sd.query_devices(AUDIO_DEVICE)
-                if info.get("max_input_channels", 0) > 0:
-                    return AUDIO_DEVICE
-                logger.warning("设备 %s 无输入通道，回退选择输入设备", AUDIO_DEVICE)
-            except Exception as exc:
-                logger.warning("查询设备 %s 失败: %s", AUDIO_DEVICE, exc)
-
-        try:
-            devices = sd.query_devices()
-            for idx, info in enumerate(devices):
-                if info.get("max_input_channels", 0) > 0:
-                    logger.info("回退至输入设备 #%s (%s)", idx, info.get("name", "unknown"))
-                    return idx
-        except Exception as exc:
-            logger.warning("查询输入设备列表失败: %s", exc)
-
-        return None
+        return resolve_input_device(sd, AUDIO_DEVICE)
 
     def _resolve_sample_rate(self, sd, device, preferred):
         """选择可用采样率，优先使用指定值。"""
