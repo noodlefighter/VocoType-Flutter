@@ -72,12 +72,40 @@ class AudioCapture:
         with self._lock:
             if not self._running:
                 return
-
-            assert self._stream is not None
-            self._stream.stop()
-            self._stream.close()
+            stream = self._stream
             self._stream = None
             self._running = False
+
+        if stream is None:
+            return
+
+        errors: list[Exception] = []
+
+        def _close_stream() -> None:
+            try:
+                stream.stop()
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+            try:
+                stream.close()
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        closer = threading.Thread(target=_close_stream, daemon=True, name="AudioStreamCloser")
+        closer.start()
+        closer.join(timeout=2.0)
+        if closer.is_alive():
+            try:
+                stream.abort()
+            except Exception:
+                pass
+            closer.join(timeout=0.5)
+            logger.warning("音频流关闭超时（2秒），跳过等待并继续退出")
+            return
+
+        if errors:
+            logger.warning("音频流关闭时出现异常: %s", "; ".join(str(e) for e in errors))
+        else:
             logger.info("音频采集已停止")
 
     def flush(self) -> None:

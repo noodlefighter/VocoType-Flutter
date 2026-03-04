@@ -2,7 +2,7 @@
 
 <h2 align="center">Linux 全平台离线语音输入法</h2>
 
-**VoCoType Linux** 是基于 [VoCoType](https://github.com/233stone/vocotype-cli) 核心引擎开发的 **Linux 离线语音输入法**，同时支持 IBus 和 Fcitx 5 两大输入法框架。
+**VoCoType Linux** 是基于 [VoCoType](https://github.com/233stone/vocotype-cli) 核心引擎开发的 **Linux 离线语音输入方案**，支持 IBus、Fcitx 5 和 Flutter Desktop 三种并行实现。
 
 > **Windows / macOS 用户**：VoCoType 原作者已实现桌面版，请访问 [vocotype.com](https://vocotype.com/)
 
@@ -24,22 +24,33 @@ https://github.com/user-attachments/assets/94772920-0f9e-4dff-8da5-c9026eb23256
 
 ## 支持平台
 
-| 输入法框架 | 状态 | 说明 |
+| 实现 | 状态 | 说明 |
 |-----------|------|------|
 | **IBus** | ✅ 完整支持 | 适用于 GNOME、大多数发行版默认 |
 | **Fcitx 5** | ✅ 完整支持 | 适用于 KDE、偏好 Fcitx 的用户 |
+| **Flutter Frontend** | ✅ 可用 | 桌面端前端，复用 Fcitx 5 Python 后端 |
 
-两个版本**可以同时安装**，共享 VoCoType 核心引擎，各自独立运行。
+三个实现可以同时安装，核心识别能力共享。
 
 ---
 
 ## 快速开始
 
+### Flutter Frontend（复用 Fcitx 5 后端）
+
+```bash
+bash scripts/install-flutter_vocotype.sh
+systemctl --user enable --now vocotype-fcitx5-backend.service
+vocotype-flutter
+```
+
+详细安装说明：[flutter_vocotype/README.md](flutter_vocotype/README.md)
+
 ### IBus 版本
 
 ```bash
 git clone https://github.com/LeonardNJU/VocoType-linux.git
-cd vocotype-cli
+cd VocoType-linux
 ./scripts/install-ibus.sh
 ibus restart
 ```
@@ -50,7 +61,7 @@ ibus restart
 
 ```bash
 git clone https://github.com/LeonardNJU/VocoType-linux.git
-cd vocotype-cli
+cd VocoType-linux
 bash fcitx5/scripts/install-fcitx5.sh
 fcitx5 -r
 ```
@@ -90,27 +101,31 @@ VoCoType Linux
 ├── app/                    # 核心引擎（共享）
 │   ├── funasr_server.py    # 语音识别（FunASR）
 │   └── ...
-├── ibus/                   # IBus 版本
-│   ├── engine.py           # IBus 引擎
+├── fcitx5/                 # Fcitx 5 版本
+│   ├── addon/              # C++ Addon
+│   ├── backend/            # Python 后端
 │   └── README.md
-└── fcitx5/                 # Fcitx 5 版本
-    ├── addon/              # C++ Addon
-    ├── backend/            # Python 后端
+├── flutter_vocotype/       # Flutter 桌面前端（复用 fcitx5/backend）
+│   ├── lib/
+│   └── README.md
+└── ibus/                   # IBus 版本
+    ├── engine.py           # IBus 引擎
     └── README.md
 ```
 
-IBus 和 Fcitx 5 是**并列独立**的实现，共享 VoCoType 核心（语音识别、音频采集）。
+IBus、Fcitx 5 和 Flutter 前端是并列实现，其中 Flutter 前端复用 Fcitx 5 Python 后端。
 
 ---
 
 ## 版本对比
 
-| 特性 | IBus 版本 | Fcitx 5 版本 |
-|-----|----------|-------------|
-| 输入法框架 | IBus | Fcitx 5 |
-| 实现语言 | 纯 Python | C++ + Python (IPC) |
-| 安装位置 | `~/.local/share/vocotype/` | `~/.local/share/vocotype-fcitx5/` |
-| 适用桌面 | GNOME 等 | KDE 等 |
+| 特性 | IBus 版本 | Fcitx 5 版本 | Flutter Frontend |
+|-----|----------|-------------|------------------|
+| 交互形态 | IBus 输入法引擎 | Fcitx 5 Addon + 后端 | Flutter 桌面应用 + Fcitx5 后端 |
+| 实现语言 | 纯 Python | C++ + Python (IPC) | Dart + Python (IPC) |
+| 默认热键 | F9 | F9 | F2 |
+| 安装位置 | `~/.local/share/vocotype/` | `~/.local/share/vocotype-fcitx5/` | `~/.local/share/vocotype-flutter_vocotype/` |
+| 适用桌面 | GNOME 等 | KDE 等 | GNOME/KDE/其他桌面 |
 
 ---
 
@@ -161,6 +176,7 @@ IBus 和 Fcitx 5 是**并列独立**的实现，共享 VoCoType 核心（语音�
 
 - [IBus 版本安装指南](ibus/README.md)
 - [Fcitx 5 版本安装指南](fcitx5/README.md)
+- [Flutter Frontend 安装指南](flutter_vocotype/README.md)
 - [Rime 拼音配置指南](RIME_CONFIG_GUIDE.md)（可选功能）
 
 ---

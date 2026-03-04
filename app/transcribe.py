@@ -115,6 +115,10 @@ class TranscriptionWorker:
             # 停止音频捕获
             if hasattr(self, 'audio'):
                 self.audio.stop()
+
+            # 释放 FunASR 模型资源，避免退出时残留后台线程/资源
+            if hasattr(self, "fun_server") and self.fun_server is not None:
+                self.fun_server.cleanup()
                 
             logger.debug("TranscriptionWorker 资源清理完成")
         except Exception as exc:
@@ -265,6 +269,10 @@ class TranscriptionWorker:
             if capture_thread_to_join and capture_thread_to_join.is_alive():
                 capture_thread_to_join.join(timeout=5)
 
+        drained_frames, drained_bytes = self._drain_audio_queue()
+        if drained_frames > 0:
+            logger.info("停止时从音频队列补收 %s 帧（%s 字节）", drained_frames, drained_bytes)
+
         combined = self._combine_buffer()
         self.audio.flush()
 
@@ -334,6 +342,32 @@ class TranscriptionWorker:
         with self._buffer_lock:
             frame_count = len(self._buffer)
         logger.debug("capture loop exiting, collected %s frames", frame_count)
+
+    def _drain_audio_queue(self) -> tuple[int, int]:
+        """停止时兜底排空音频队列，避免 capture 线程来不及消费造成丢帧。"""
+        queue_obj = self.audio.queue
+        drained_frames = 0
+        drained_bytes = 0
+
+        while True:
+            try:
+                frame = queue_obj.get_nowait()
+            except queue.Empty:
+                break
+
+            try:
+                with self._buffer_lock:
+                    if isinstance(frame, np.ndarray):
+                        arr = frame
+                    else:
+                        arr = np.frombuffer(frame, dtype=np.int16)
+                    self._buffer.append(arr)
+                    drained_bytes += arr.nbytes
+                    drained_frames += 1
+            except Exception as exc:
+                logger.error("排空音频队列时出错: %s", exc)
+
+        return drained_frames, drained_bytes
 
     def _combine_buffer(self) -> Optional[np.ndarray]:
         with self._buffer_lock:

@@ -15,6 +15,7 @@ import signal
 import stat
 import threading
 from pathlib import Path
+from dataclasses import asdict, dataclass
 
 # 添加项目根目录到 path
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -24,6 +25,8 @@ from app.config import DEFAULT_CONFIG, ensure_logging_dir, load_config
 from app.funasr_server import FunASRServer
 from app.logging_config import setup_logging
 from backend.rime_handler import RimeHandler
+from backend.audio_recorder import AudioRecorder
+from app.audio_utils import load_audio_config
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +34,17 @@ SOCKET_PATH = "/tmp/vocotype-fcitx5.sock"
 MAX_REQUEST_BYTES = 1024 * 1024
 REQUEST_TIMEOUT_S = 2.0
 DEFAULT_CONFIG_PATH = "~/.config/vocotype/fcitx5-backend.json"
+
+
+@dataclass
+class ResultEnvelope:
+    seq: int
+    text: str
+    raw_text: str
+    duration: float
+    inference_latency: float
+    confidence: float
+    error: str | None = None
 
 
 def load_backend_config() -> tuple[dict, str]:
@@ -86,6 +100,14 @@ class Fcitx5Backend:
         self.running = True
         self._asr_lock = threading.Lock()
         self._rime_lock = threading.Lock()
+        self._record_lock = threading.Lock()
+        self._recorder: AudioRecorder | None = None
+        self._recording = False
+        self._result_seq = 0
+        self._last_result: ResultEnvelope | None = None
+        self._audio_device, self._audio_sample_rate = load_audio_config()
+        if isinstance(self._audio_device, str) and self._audio_device.isdigit():
+            self._audio_device = int(self._audio_device)
 
         # 注册信号处理
         signal.signal(signal.SIGTERM, self._signal_handler)
@@ -193,17 +215,24 @@ class Fcitx5Backend:
                     response_str = json.dumps({"error": "Request too large"}, ensure_ascii=False)
                     conn.sendall(response_str.encode('utf-8'))
                     return
+                if b"\n" in chunk:
+                    break
             if not chunks:
                 return
-            data = b''.join(chunks).decode('utf-8')
+            data = b''.join(chunks).decode('utf-8').strip()
+            if "\n" in data:
+                data = data.splitlines()[0].strip()
 
             request = json.loads(data)
+            cmd = request.get('cmd')
             req_type = request.get('type')
 
-            logger.debug("收到请求: type=%s", req_type)
+            logger.debug("收到请求: cmd=%s type=%s", cmd, req_type)
 
             # 处理请求
-            if req_type == 'transcribe':
+            if cmd is not None:
+                response = self._dispatch_frontend_cmd(request)
+            elif req_type == 'transcribe':
                 # 语音识别
                 audio_path = request.get('audio_path')
                 if not audio_path:
@@ -271,6 +300,100 @@ class Fcitx5Backend:
 
         finally:
             conn.close()
+
+    def _dispatch_frontend_cmd(self, request: dict) -> dict:
+        cmd = str(request.get("cmd", "")).strip().lower()
+
+        if cmd == "ping":
+            return {"ok": True, "type": "pong"}
+
+        if cmd == "start":
+            return self._start_recording()
+
+        if cmd == "stop":
+            return self._stop_recording(transcribe=False)
+
+        if cmd == "stop_and_wait":
+            return self._stop_recording(transcribe=True)
+
+        if cmd == "status":
+            return {
+                "ok": True,
+                "recording": self._recording,
+                "transcribing": False,
+                "stats": {"transcription_count": self.asr_server.transcription_count},
+                "last_result": asdict(self._last_result) if self._last_result else None,
+            }
+
+        if cmd == "shutdown":
+            self.running = False
+            return {"ok": True}
+
+        return {"ok": False, "error": f"unknown_cmd:{cmd}"}
+
+    def _start_recording(self) -> dict:
+        with self._record_lock:
+            if self._recording:
+                return {"ok": True, "recording": True}
+
+            recorder = AudioRecorder(
+                device=self._audio_device,
+                sample_rate=self._audio_sample_rate,
+            )
+            try:
+                recorder.start()
+            except Exception as exc:
+                return {"ok": False, "error": f"start_failed: {exc}"}
+
+            self._recorder = recorder
+            self._recording = True
+            return {"ok": True, "recording": True}
+
+    def _stop_recording(self, transcribe: bool) -> dict:
+        with self._record_lock:
+            recorder = self._recorder
+            if recorder is None or not self._recording:
+                return {"ok": False, "error": "not_recording"}
+            self._recorder = None
+            self._recording = False
+
+        try:
+            audio_path = recorder.stop()
+        except Exception as exc:
+            return {"ok": False, "error": f"stop_failed: {exc}"}
+
+        if not transcribe:
+            if audio_path:
+                try:
+                    os.remove(audio_path)
+                except OSError:
+                    pass
+            return {"ok": True, "recording": False}
+
+        if audio_path is None:
+            return {"ok": False, "error": "no_audio"}
+
+        try:
+            with self._asr_lock:
+                asr_result = self.asr_server.transcribe_audio(str(audio_path))
+        finally:
+            try:
+                os.remove(audio_path)
+            except OSError:
+                pass
+
+        envelope = ResultEnvelope(
+            seq=self._result_seq + 1,
+            text=str(asr_result.get("text", "")).strip() if asr_result.get("success") else "",
+            raw_text=str(asr_result.get("raw_text", "")) if asr_result.get("success") else "",
+            duration=float(asr_result.get("duration", 0.0) or 0.0),
+            inference_latency=0.0,
+            confidence=float(asr_result.get("confidence", 0.0) or 0.0),
+            error=None if asr_result.get("success") else str(asr_result.get("error", "transcribe_failed")),
+        )
+        self._result_seq = envelope.seq
+        self._last_result = envelope
+        return {"ok": True, "result": asdict(envelope)}
 
     def cleanup(self):
         """清理资源"""

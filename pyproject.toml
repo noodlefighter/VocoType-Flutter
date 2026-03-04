@@ -39,6 +39,7 @@ Homepage = "https://github.com/vocotype"
 [project.scripts]
 vocotype-ibus = "ibus.main:main"
 vocotype-download-models = "app.download_models:main"
+vocotype-standalone-daemon = "app.standalone.daemon:main"
 
 [tool.setuptools]
 py-modules = ["vocotype_version"]
