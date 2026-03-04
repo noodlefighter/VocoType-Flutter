@@ -5,11 +5,66 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:hotkey_manager/hotkey_manager.dart';
+import 'package:launch_at_startup/launch_at_startup.dart';
+import 'package:tray_manager/tray_manager.dart';
+import 'package:window_manager/window_manager.dart';
+
+const String _kAutostartAppName = 'Vocotype Flutter';
+const String _kLegacyAutostartAppName = 'VoCoType Fcitx5';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await windowManager.ensureInitialized();
+  await _migrateLegacyAutostartEntry();
+  launchAtStartup.setup(
+    appName: _kAutostartAppName,
+    appPath: Platform.resolvedExecutable,
+  );
+  const WindowOptions windowOptions = WindowOptions(skipTaskbar: true);
+  await windowManager.waitUntilReadyToShow(windowOptions, () async {
+    await windowManager.hide();
+  });
   await hotKeyManager.unregisterAll();
   runApp(const VoCoTypeApp());
+}
+
+Future<void> _migrateLegacyAutostartEntry() async {
+  if (!Platform.isLinux) {
+    return;
+  }
+  final home = Platform.environment['HOME'];
+  if (home == null || home.isEmpty) {
+    return;
+  }
+
+  final autostartDir = Directory('$home/.config/autostart');
+  final legacyFile =
+      File('${autostartDir.path}/$_kLegacyAutostartAppName.desktop');
+  if (!await legacyFile.exists()) {
+    return;
+  }
+
+  final newFile = File('${autostartDir.path}/$_kAutostartAppName.desktop');
+  if (await newFile.exists()) {
+    return;
+  }
+
+  try {
+    var content = await legacyFile.readAsString();
+    content = content
+        .replaceAll(
+          'Name=$_kLegacyAutostartAppName',
+          'Name=$_kAutostartAppName',
+        )
+        .replaceAll(
+          'Comment=$_kLegacyAutostartAppName startup script',
+          'Comment=$_kAutostartAppName startup script',
+        );
+    await newFile.writeAsString(content);
+    await legacyFile.delete();
+  } catch (_) {
+    // Ignore migration failures.
+  }
 }
 
 class VoCoTypeApp extends StatelessWidget {
@@ -18,7 +73,7 @@ class VoCoTypeApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'VoCoType Fcitx5',
+      title: 'Vocotype Flutter',
       theme: ThemeData(useMaterial3: true, colorSchemeSeed: Colors.teal),
       home: const HomePage(),
     );
@@ -78,12 +133,15 @@ enum TypeBackend {
   }
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
   final DaemonClient _client = DaemonClient();
   final List<String> _logs = <String>[];
 
   bool _recording = false;
   bool _busy = false;
+  bool _autostartEnabled = false;
+  bool _autostartBusy = true;
+  bool _isQuitting = false;
   TypeBackend _typeBackend = _typeBackendFromEnv();
   String _lastText = '';
   HotKey? _hotKey;
@@ -112,6 +170,9 @@ class _HomePageState extends State<HomePage> {
   @override
   void initState() {
     super.initState();
+    trayManager.addListener(this);
+    windowManager.addListener(this);
+    unawaited(_initDesktopBehaviors());
     unawaited(_bindHotkey());
     unawaited(_ping());
     _addLog(
@@ -122,8 +183,183 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
+    trayManager.removeListener(this);
+    windowManager.removeListener(this);
     unawaited(_unbindHotkey());
     super.dispose();
+  }
+
+  Future<void> _initDesktopBehaviors() async {
+    await _safeDesktopInit(windowManager.setPreventClose(true), 'Window setup');
+    await _safeDesktopInit(
+      trayManager.setIcon('assets/tray_icon.png'),
+      'Tray icon setup',
+    );
+    if (!Platform.isLinux) {
+      await _safeDesktopInit(
+        trayManager.setToolTip('Vocotype Flutter'),
+        'Tray tooltip setup',
+      );
+    }
+    await _safeDesktopInit(_updateTrayMenu(), 'Tray menu setup');
+    _addLog('Tray initialized');
+    await _loadAutostartState();
+    await _hideToTray(log: false);
+    _addLog('App started minimized to tray');
+  }
+
+  Future<void> _safeDesktopInit(Future<void> future, String label) async {
+    try {
+      await future;
+    } catch (e) {
+      _addLog('$label failed: $e');
+    }
+  }
+
+  Future<void> _updateTrayMenu() async {
+    final Menu menu = Menu(
+      items: <MenuItem>[
+        MenuItem(
+          key: 'show_window',
+          label: '显示窗口',
+        ),
+        MenuItem.separator(),
+        MenuItem(
+          key: 'exit_app',
+          label: '退出',
+        ),
+      ],
+    );
+    await trayManager.setContextMenu(menu);
+  }
+
+  Future<void> _loadAutostartState() async {
+    try {
+      final enabled = await launchAtStartup.isEnabled();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _autostartEnabled = enabled;
+        _autostartBusy = false;
+      });
+      _addLog('Autostart ${enabled ? 'enabled' : 'disabled'}');
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _autostartBusy = false;
+      });
+      _addLog('Autostart status check failed: $e');
+    }
+  }
+
+  Future<void> _setAutostartEnabled(bool enabled) async {
+    if (_autostartBusy) {
+      return;
+    }
+    setState(() {
+      _autostartBusy = true;
+    });
+    try {
+      if (enabled) {
+        await launchAtStartup.enable();
+      } else {
+        await launchAtStartup.disable();
+      }
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _autostartEnabled = enabled;
+        _autostartBusy = false;
+      });
+      _addLog('Autostart ${enabled ? 'enabled' : 'disabled'}');
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _autostartBusy = false;
+      });
+      _addLog('Autostart update failed: $e');
+    }
+  }
+
+  Future<void> _showWindowFromTray() async {
+    try {
+      await windowManager.setSkipTaskbar(false);
+      await windowManager.show();
+      await windowManager.focus();
+    } catch (e) {
+      _addLog('Show window failed: $e');
+    }
+  }
+
+  Future<void> _hideToTray({bool log = true}) async {
+    try {
+      await windowManager.setSkipTaskbar(true);
+      await windowManager.hide();
+      if (log) {
+        _addLog('Window hidden to tray');
+      }
+    } catch (e) {
+      _addLog('Hide to tray failed: $e');
+    }
+  }
+
+  Future<void> _popUpTrayMenu() async {
+    try {
+      await trayManager.popUpContextMenu();
+    } catch (e) {
+      _addLog('Tray menu popup failed: $e');
+    }
+  }
+
+  Future<void> _exitApp() async {
+    if (_isQuitting) {
+      return;
+    }
+    _isQuitting = true;
+    try {
+      await trayManager.destroy();
+    } catch (_) {
+      // Ignore tray cleanup failures.
+    }
+    await windowManager.destroy();
+  }
+
+  @override
+  void onTrayIconMouseDown() {
+    unawaited(_showWindowFromTray());
+  }
+
+  @override
+  void onTrayIconRightMouseDown() {
+    if (!Platform.isLinux) {
+      unawaited(_popUpTrayMenu());
+    }
+  }
+
+  @override
+  void onTrayMenuItemClick(MenuItem menuItem) {
+    switch (menuItem.key) {
+      case 'show_window':
+        unawaited(_showWindowFromTray());
+        break;
+      case 'exit_app':
+        unawaited(_exitApp());
+        break;
+    }
+  }
+
+  @override
+  void onWindowClose() {
+    if (_isQuitting) {
+      return;
+    }
+    unawaited(_hideToTray());
   }
 
   Future<void> _bindHotkey() async {
@@ -223,6 +459,9 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _addLog(String line) {
+    if (!mounted) {
+      return;
+    }
     final ts = DateTime.now().toIso8601String().substring(11, 19);
     setState(() {
       _logs.insert(0, '[$ts] $line');
@@ -400,7 +639,8 @@ class _HomePageState extends State<HomePage> {
     return false;
   }
 
-  Future<Process?> _startSelectionProvider(String selection, String text) async {
+  Future<Process?> _startSelectionProvider(
+      String selection, String text) async {
     try {
       final process = await Process.start(
         'xclip',
@@ -435,7 +675,7 @@ class _HomePageState extends State<HomePage> {
             : 'Idle (hold F2 to talk)');
 
     return Scaffold(
-      appBar: AppBar(title: const Text('VoCoType Fcitx5')),
+      appBar: AppBar(title: const Text('Vocotype Flutter')),
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -480,6 +720,20 @@ class _HomePageState extends State<HomePage> {
             const SizedBox(height: 4),
             Text(
               'Effective backend: ${_effectiveBackendForCurrentSession().label}',
+            ),
+            const SizedBox(height: 12),
+            CheckboxListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('开机启动'),
+              subtitle: Text(
+                _autostartBusy ? '读取中...' : (_autostartEnabled ? '已启用' : '已关闭'),
+              ),
+              value: _autostartEnabled,
+              onChanged: _autostartBusy
+                  ? null
+                  : (bool? value) {
+                      unawaited(_setAutostartEnabled(value ?? false));
+                    },
             ),
             const SizedBox(height: 12),
             Wrap(

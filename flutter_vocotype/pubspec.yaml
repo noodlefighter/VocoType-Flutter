@@ -10,6 +10,9 @@ dependencies:
   flutter:
     sdk: flutter
   hotkey_manager: ^0.2.3
+  tray_manager: ^0.5.1
+  window_manager: ^0.5.1
+  launch_at_startup: ^0.5.1
 
 dev_dependencies:
   flutter_test:
@@ -19,6 +22,10 @@ dev_dependencies:
 dependency_overrides:
   hotkey_manager_linux:
     path: third_party/hotkey_manager_linux
+  tray_manager:
+    path: third_party/tray_manager
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/tray_icon.png
