@@ -311,17 +311,25 @@ __VOCOTYPE_FLUTTER_LAUNCHER_EOF__
 chmod +x "$HOME/.local/bin/vocotype-flutter"
 
 mkdir -p "$HOME/.local/share/applications"
-cat > "$HOME/.local/share/applications/vocotype-flutter.desktop" << '__VOCOTYPE_DESKTOP_EOF__'
+cat > "$HOME/.local/share/applications/vocotype-flutter.desktop" << __VOCOTYPE_DESKTOP_EOF__
 [Desktop Entry]
 Type=Application
 Name=VoCoType Flutter
 Comment=VoCoType Flutter Frontend
-Exec=/bin/sh -lc "$HOME/.local/bin/vocotype-flutter"
+Exec=$HOME/.local/bin/vocotype-flutter
+TryExec=$HOME/.local/bin/vocotype-flutter
 Icon=audio-input-microphone
 Terminal=false
 Categories=Utility;
 StartupNotify=true
 __VOCOTYPE_DESKTOP_EOF__
+
+if command -v desktop-file-validate >/dev/null 2>&1; then
+    if ! desktop-file-validate "$HOME/.local/share/applications/vocotype-flutter.desktop"; then
+        echo "⚠️  生成的 desktop 文件未通过校验，请检查:"
+        echo "   $HOME/.local/share/applications/vocotype-flutter.desktop"
+    fi
+fi
 
 echo "✓ Flutter 前端已安装"
 
