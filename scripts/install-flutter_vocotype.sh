@@ -41,8 +41,8 @@ done
 PROJECT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 SCRIPT_DIR="$PROJECT_DIR/scripts"
 FRONTEND_SOURCE_DIR="$PROJECT_DIR/flutter_vocotype"
-BACKEND_INSTALL_DIR="$HOME/.local/share/vocotype-fcitx5"
 FRONTEND_INSTALL_DIR="$HOME/.local/share/vocotype-flutter_vocotype"
+BACKEND_INSTALL_DIR="$FRONTEND_INSTALL_DIR/backend_runtime"
 
 PYTHON_MIN_MINOR=11
 PYTHON_MAX_MINOR=12
@@ -233,51 +233,38 @@ else
 fi
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 6. 创建后端启动器与 systemd 服务
+# 6. 迁移清理旧版 systemd 后端
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 echo ""
-echo "[6/8] 创建后端服务..."
-mkdir -p "$HOME/.local/bin"
-cat > "$HOME/.local/bin/vocotype-fcitx5-backend" << '__VOCOTYPE_BACKEND_LAUNCHER_EOF__'
-#!/bin/bash
-INSTALL_DIR="$HOME/.local/share/vocotype-fcitx5"
-PYTHON="$INSTALL_DIR/.venv/bin/python"
-SERVER_SCRIPT="$INSTALL_DIR/backend/fcitx5_server.py"
-
-if pgrep -f "fcitx5_server.py" >/dev/null; then
-    echo "VoCoType Fcitx5 Backend 已在运行"
-    exit 0
-fi
-
-exec "$PYTHON" "$SERVER_SCRIPT" "$@"
-__VOCOTYPE_BACKEND_LAUNCHER_EOF__
-chmod +x "$HOME/.local/bin/vocotype-fcitx5-backend"
-
-mkdir -p "$HOME/.config/systemd/user"
-cat > "$HOME/.config/systemd/user/vocotype-fcitx5-backend.service" << '__VOCOTYPE_BACKEND_SERVICE_EOF__'
-[Unit]
-Description=VoCoType Fcitx5 Backend Service
-After=graphical-session.target
-
-[Service]
-Type=simple
-ExecStart=%h/.local/bin/vocotype-fcitx5-backend
-ExecStopPost=-/usr/bin/pkill -f "%h/.local/share/vocotype-fcitx5/backend/audio_recorder.py"
-KillMode=mixed
-Restart=on-failure
-RestartSec=5s
-Environment="PYTHONIOENCODING=UTF-8"
-
-[Install]
-WantedBy=default.target
-__VOCOTYPE_BACKEND_SERVICE_EOF__
+echo "[6/8] 清理旧版 systemd 后端..."
+LEGACY_BACKEND_LAUNCHER="$HOME/.local/bin/vocotype-fcitx5-backend"
+LEGACY_BACKEND_SERVICE="$HOME/.config/systemd/user/vocotype-fcitx5-backend.service"
+LEGACY_BACKEND_DIR="$HOME/.local/share/vocotype-fcitx5"
 
 if command -v systemctl >/dev/null 2>&1; then
-    systemctl --user daemon-reload >/dev/null 2>&1 || \
-        echo "⚠️  systemctl --user daemon-reload 失败，请手动执行"
+    if systemctl --user list-unit-files | grep -q "^vocotype-fcitx5-backend.service"; then
+        echo "检测到旧版 systemd 服务，正在停用..."
+        systemctl --user stop vocotype-fcitx5-backend.service >/dev/null 2>&1 || true
+        systemctl --user disable vocotype-fcitx5-backend.service >/dev/null 2>&1 || true
+        systemctl --user daemon-reload >/dev/null 2>&1 || \
+            echo "⚠️  systemctl --user daemon-reload 失败，请手动执行"
+        echo "✓ 旧版 systemd 服务已停用"
+    fi
 fi
 
-echo "✓ 后端服务已创建"
+if [ -f "$LEGACY_BACKEND_SERVICE" ]; then
+    rm -f "$LEGACY_BACKEND_SERVICE"
+    echo "✓ 已移除旧 service 文件: $LEGACY_BACKEND_SERVICE"
+fi
+
+if [ -f "$LEGACY_BACKEND_LAUNCHER" ]; then
+    rm -f "$LEGACY_BACKEND_LAUNCHER"
+    echo "✓ 已移除旧启动器: $LEGACY_BACKEND_LAUNCHER"
+fi
+
+if [ -d "$LEGACY_BACKEND_DIR" ]; then
+    echo "⚠️  检测到旧后端目录（可按需手动删除）: $LEGACY_BACKEND_DIR"
+fi
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 7. 构建并安装 Flutter 前端
@@ -306,6 +293,7 @@ cp -r "$BUNDLE_DIR" "$FRONTEND_INSTALL_DIR/app"
 
 cat > "$HOME/.local/bin/vocotype-flutter" << '__VOCOTYPE_FLUTTER_LAUNCHER_EOF__'
 #!/bin/bash
+export VOCOTYPE_BACKEND_RUNTIME="$HOME/.local/share/vocotype-flutter_vocotype/backend_runtime"
 exec "$HOME/.local/share/vocotype-flutter_vocotype/app/vocotype_flutter" "$@"
 __VOCOTYPE_FLUTTER_LAUNCHER_EOF__
 chmod +x "$HOME/.local/bin/vocotype-flutter"
@@ -343,18 +331,15 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 echo "📝 接下来的步骤："
 echo ""
-echo "1. 启动后端服务："
-echo "   systemctl --user daemon-reload"
-echo "   systemctl --user enable --now vocotype-fcitx5-backend.service"
-echo ""
-echo "2. 启动 Flutter 前端："
+echo "1. 启动 Flutter 前端："
 echo "   vocotype-flutter"
 echo ""
-echo "3. 使用方式："
+echo "2. 使用方式："
 echo "   - 按住 F2 说话，松开后识别"
 echo "   - 识别文本将自动输入到当前焦点窗口"
+echo "   - 后端由 Flutter 自动拉起与停止（无需 systemd）"
 echo ""
-echo "4. 可选：设置文本输入后端"
+echo "3. 可选：设置文本输入后端"
 echo "   export VOCOTYPE_TYPE_BACKEND=auto   # auto | xdotool | wtype | shift_insert"
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

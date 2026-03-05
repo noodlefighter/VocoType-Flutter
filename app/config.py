@@ -38,6 +38,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "min_chars": 1,
         "method": "auto",
         "append_newline": False,
+        "remove_period": False,
     },
     "logging": {"dir": "logs", "level": "INFO"},
 }
@@ -89,5 +90,4 @@ def ensure_logging_dir(config: Dict[str, Any]) -> str:
     
     os.makedirs(log_dir, exist_ok=True)
     return log_dir
-
 

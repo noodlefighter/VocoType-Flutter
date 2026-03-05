@@ -9,6 +9,8 @@ from __future__ import annotations
 import sys
 import os
 import json
+import copy
+import re
 import socket
 import logging
 import signal
@@ -52,13 +54,13 @@ def load_backend_config() -> tuple[dict, str]:
     config_path = os.environ.get("VOCOTYPE_FCITX5_CONFIG", DEFAULT_CONFIG_PATH)
     expanded_path = os.path.expanduser(config_path)
     if not os.path.exists(expanded_path):
-        return dict(DEFAULT_CONFIG), expanded_path
+        return copy.deepcopy(DEFAULT_CONFIG), expanded_path
 
     try:
         return load_config(expanded_path), expanded_path
     except Exception as exc:
         print(f"Failed to load config {expanded_path}: {exc}", file=sys.stderr)
-        return dict(DEFAULT_CONFIG), expanded_path
+        return copy.deepcopy(DEFAULT_CONFIG), expanded_path
 
 
 def configure_logging(config: dict, debug: bool) -> None:
@@ -108,10 +110,60 @@ class Fcitx5Backend:
         self._audio_device, self._audio_sample_rate = load_audio_config()
         if isinstance(self._audio_device, str) and self._audio_device.isdigit():
             self._audio_device = int(self._audio_device)
+        self._config_lock = threading.Lock()
+        self._config_path = os.path.expanduser(
+            os.environ.get("VOCOTYPE_FCITX5_CONFIG", DEFAULT_CONFIG_PATH)
+        )
+        self._config_mtime: float | None = None
+        self._runtime_config = copy.deepcopy(DEFAULT_CONFIG)
 
         # 注册信号处理
         signal.signal(signal.SIGTERM, self._signal_handler)
         signal.signal(signal.SIGINT, self._signal_handler)
+
+    def _reload_runtime_config_if_needed(self) -> dict:
+        """Reload backend config on file change and fallback to defaults on error."""
+        with self._config_lock:
+            try:
+                st = os.stat(self._config_path)
+            except FileNotFoundError:
+                self._config_mtime = None
+                self._runtime_config = copy.deepcopy(DEFAULT_CONFIG)
+                return self._runtime_config
+            except OSError as exc:
+                logger.warning("读取配置文件状态失败，回退默认配置: %s", exc)
+                self._config_mtime = None
+                self._runtime_config = copy.deepcopy(DEFAULT_CONFIG)
+                return self._runtime_config
+
+            if self._config_mtime == st.st_mtime:
+                return self._runtime_config
+
+            try:
+                self._runtime_config = load_config(self._config_path)
+                self._config_mtime = st.st_mtime
+                logger.info("配置已重载: %s", self._config_path)
+            except Exception as exc:
+                logger.warning("加载配置失败，回退默认配置: %s", exc)
+                self._runtime_config = copy.deepcopy(DEFAULT_CONFIG)
+                self._config_mtime = st.st_mtime
+
+            return self._runtime_config
+
+    def _postprocess_output_text(self, text: str) -> str:
+        config = self._reload_runtime_config_if_needed()
+        output_cfg = config.get("output", {})
+        if not bool(output_cfg.get("remove_period", False)):
+            return text
+        return re.sub(r"[。.]+$", "", text)
+
+    def _apply_asr_postprocess(self, asr_result: dict) -> dict:
+        if not asr_result.get("success"):
+            return asr_result
+
+        response = dict(asr_result)
+        response["text"] = self._postprocess_output_text(str(response.get("text", "")))
+        return response
 
     def _cleanup_socket_path(self, path: str) -> None:
         """安全删除旧 socket 文件（避免误删普通文件）"""
@@ -240,7 +292,7 @@ class Fcitx5Backend:
                 else:
                     with self._asr_lock:
                         result = self.asr_server.transcribe_audio(audio_path)
-                    response = result
+                    response = self._apply_asr_postprocess(result)
 
             elif req_type == 'key_event':
                 # Rime 按键处理
@@ -384,7 +436,9 @@ class Fcitx5Backend:
 
         envelope = ResultEnvelope(
             seq=self._result_seq + 1,
-            text=str(asr_result.get("text", "")).strip() if asr_result.get("success") else "",
+            text=self._postprocess_output_text(str(asr_result.get("text", "")).strip())
+            if asr_result.get("success")
+            else "",
             raw_text=str(asr_result.get("raw_text", "")) if asr_result.get("success") else "",
             duration=float(asr_result.get("duration", 0.0) or 0.0),
             inference_latency=0.0,

@@ -11,6 +11,9 @@ import 'package:window_manager/window_manager.dart';
 
 const String _kAutostartAppName = 'Vocotype Flutter';
 const String _kLegacyAutostartAppName = 'VoCoType Fcitx5';
+const String _kBackendConfigRelativePath =
+    '.config/vocotype/fcitx5-backend.json';
+const String _kBackendRuntimeEnv = 'VOCOTYPE_BACKEND_RUNTIME';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -106,6 +109,18 @@ class DaemonClient {
   }
 }
 
+class _BackendLaunchCommand {
+  _BackendLaunchCommand({
+    required this.pythonPath,
+    required this.scriptPath,
+    required this.runtimeDir,
+  });
+
+  final String pythonPath;
+  final String scriptPath;
+  final String runtimeDir;
+}
+
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -141,10 +156,15 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
   bool _busy = false;
   bool _autostartEnabled = false;
   bool _autostartBusy = true;
+  bool _removePeriod = false;
+  bool _settingsBusy = true;
   bool _isQuitting = false;
   TypeBackend _typeBackend = _typeBackendFromEnv();
   String _lastText = '';
   HotKey? _hotKey;
+  Process? _managedBackendProcess;
+  bool _backendStartedByApp = false;
+  Future<void>? _ensureBackendFuture;
 
   static TypeBackend _typeBackendFromEnv() {
     final raw = (Platform.environment['VOCOTYPE_TYPE_BACKEND'] ?? '')
@@ -174,7 +194,7 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     windowManager.addListener(this);
     unawaited(_initDesktopBehaviors());
     unawaited(_bindHotkey());
-    unawaited(_ping());
+    unawaited(_bootstrapRuntime());
     _addLog(
       'Input backend: ${_typeBackend.label} '
       '(effective: ${_effectiveBackendForCurrentSession().label})',
@@ -186,6 +206,7 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     trayManager.removeListener(this);
     windowManager.removeListener(this);
     unawaited(_unbindHotkey());
+    _managedBackendProcess = null;
     super.dispose();
   }
 
@@ -287,6 +308,345 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     }
   }
 
+  Future<void> _bootstrapRuntime() async {
+    await _ensureBackendRunning();
+    await _loadRemovePeriodSetting();
+    await _ping();
+  }
+
+  File _backendConfigFile() {
+    final home = Platform.environment['HOME'];
+    if (home == null || home.isEmpty) {
+      throw StateError('HOME is not set');
+    }
+    return File('$home/$_kBackendConfigRelativePath');
+  }
+
+  _BackendLaunchCommand? _resolveBackendLaunchCommand() {
+    final runtimeDirs = <String>{};
+    final envRuntime = Platform.environment[_kBackendRuntimeEnv];
+    if (envRuntime != null && envRuntime.isNotEmpty) {
+      runtimeDirs.add(envRuntime);
+    }
+
+    final home = Platform.environment['HOME'];
+    if (home != null && home.isNotEmpty) {
+      runtimeDirs
+          .add('$home/.local/share/vocotype-flutter_vocotype/backend_runtime');
+    }
+
+    final executable = File(Platform.resolvedExecutable);
+    runtimeDirs.add('${executable.parent.parent.path}/backend_runtime');
+
+    for (final runtimeDir in runtimeDirs) {
+      final pythonPath = '$runtimeDir/.venv/bin/python';
+      final scriptPath = '$runtimeDir/backend/fcitx5_server.py';
+      if (File(pythonPath).existsSync() && File(scriptPath).existsSync()) {
+        return _BackendLaunchCommand(
+          pythonPath: pythonPath,
+          scriptPath: scriptPath,
+          runtimeDir: runtimeDir,
+        );
+      }
+    }
+
+    final cwd = Directory.current.path;
+    final fallbackScripts = <String>[
+      '$cwd/fcitx5/backend/fcitx5_server.py',
+      '$cwd/../fcitx5/backend/fcitx5_server.py',
+    ];
+
+    for (final scriptPath in fallbackScripts) {
+      if (!File(scriptPath).existsSync()) {
+        continue;
+      }
+      final fallbackPythonCandidates = <String>[
+        '$cwd/.venv/bin/python',
+        '$cwd/../.venv/bin/python',
+      ];
+      var pythonPath = 'python3';
+      for (final candidate in fallbackPythonCandidates) {
+        if (File(candidate).existsSync()) {
+          pythonPath = candidate;
+          break;
+        }
+      }
+      return _BackendLaunchCommand(
+        pythonPath: pythonPath,
+        scriptPath: scriptPath,
+        runtimeDir: File(scriptPath).parent.parent.parent.path,
+      );
+    }
+    return null;
+  }
+
+  Future<bool> _daemonPing() async {
+    try {
+      final resp = await _client.send(<String, dynamic>{'cmd': 'ping'});
+      return resp['ok'] == true ||
+          resp['pong'] == true ||
+          resp['type'] == 'pong';
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _ensureBackendRunning() {
+    final pending = _ensureBackendFuture;
+    if (pending != null) {
+      return pending;
+    }
+    final future = _ensureBackendRunningImpl();
+    _ensureBackendFuture = future;
+    return future.whenComplete(() {
+      if (identical(_ensureBackendFuture, future)) {
+        _ensureBackendFuture = null;
+      }
+    });
+  }
+
+  Future<void> _ensureBackendRunningImpl() async {
+    if (await _daemonPing()) {
+      _addLog('Backend reachable');
+      return;
+    }
+
+    final started = await _startManagedBackend();
+    if (!started) {
+      return;
+    }
+
+    final ready = await _waitForBackendReady();
+    if (ready) {
+      _addLog('Backend started by app');
+      return;
+    }
+
+    _addLog('Backend startup timed out');
+    await _stopManagedBackendIfNeeded(forceKill: true);
+  }
+
+  Future<bool> _waitForBackendReady({
+    Duration timeout = const Duration(seconds: 10),
+    Duration interval = const Duration(milliseconds: 250),
+  }) async {
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      if (await _daemonPing()) {
+        return true;
+      }
+      await Future<void>.delayed(interval);
+    }
+    return false;
+  }
+
+  Future<bool> _startManagedBackend() async {
+    if (_managedBackendProcess != null) {
+      return true;
+    }
+    final command = _resolveBackendLaunchCommand();
+    if (command == null) {
+      _addLog('Backend launch command not found');
+      return false;
+    }
+
+    try {
+      final process = await Process.start(
+        command.pythonPath,
+        <String>[command.scriptPath],
+        workingDirectory: command.runtimeDir,
+        environment: <String, String>{_kBackendRuntimeEnv: command.runtimeDir},
+      );
+      _managedBackendProcess = process;
+      _backendStartedByApp = true;
+      _attachManagedBackendLogging(process);
+      _addLog('Starting backend: ${command.scriptPath}');
+      return true;
+    } catch (e) {
+      _addLog('Failed to start backend: $e');
+      _managedBackendProcess = null;
+      _backendStartedByApp = false;
+      return false;
+    }
+  }
+
+  void _attachManagedBackendLogging(Process process) {
+    unawaited(
+      process.stdout
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen(
+            (String line) => _addLog('[backend] $line'),
+            onError: (_) {},
+          )
+          .asFuture<void>(),
+    );
+    unawaited(
+      process.stderr
+          .transform(utf8.decoder)
+          .transform(const LineSplitter())
+          .listen(
+            (String line) => _addLog('[backend] $line'),
+            onError: (_) {},
+          )
+          .asFuture<void>(),
+    );
+    unawaited(
+      process.exitCode.then((int code) {
+        if (identical(_managedBackendProcess, process)) {
+          _managedBackendProcess = null;
+          _backendStartedByApp = false;
+        }
+        _addLog('Backend process exited: $code');
+      }),
+    );
+  }
+
+  Future<void> _stopManagedBackendIfNeeded({bool forceKill = false}) async {
+    final process = _managedBackendProcess;
+    if (process == null || !_backendStartedByApp) {
+      return;
+    }
+
+    if (!forceKill) {
+      try {
+        await _client.send(<String, dynamic>{'cmd': 'shutdown'}).timeout(
+            const Duration(seconds: 2));
+      } catch (_) {
+        // Ignore shutdown command failures and fallback to process signal.
+      }
+    }
+
+    try {
+      await process.exitCode.timeout(const Duration(seconds: 2));
+      _addLog('Managed backend stopped');
+    } on TimeoutException {
+      process.kill(ProcessSignal.sigterm);
+      try {
+        await process.exitCode.timeout(const Duration(seconds: 2));
+        _addLog('Managed backend stopped with SIGTERM');
+      } on TimeoutException {
+        process.kill(ProcessSignal.sigkill);
+        _addLog('Managed backend killed with SIGKILL');
+      }
+    } finally {
+      if (identical(_managedBackendProcess, process)) {
+        _managedBackendProcess = null;
+        _backendStartedByApp = false;
+      }
+    }
+  }
+
+  Future<void> _loadRemovePeriodSetting() async {
+    try {
+      final config = await _readBackendConfigMap();
+      final output = _stringDynamicMap(config['output']);
+      final enabled = output['remove_period'] == true;
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _removePeriod = enabled;
+        _settingsBusy = false;
+      });
+      _addLog('Remove period setting loaded: $enabled');
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _settingsBusy = false;
+      });
+      _addLog('Failed to load remove period setting: $e');
+    }
+  }
+
+  Future<void> _setRemovePeriodEnabled(bool enabled) async {
+    if (_settingsBusy) {
+      return;
+    }
+    final previous = _removePeriod;
+    setState(() {
+      _removePeriod = enabled;
+      _settingsBusy = true;
+    });
+
+    try {
+      final config = await _readBackendConfigMap();
+      final merged = _mergeConfigWithRemovePeriod(config, enabled);
+      await _writeBackendConfigAtomically(merged);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _settingsBusy = false;
+      });
+      _addLog('Remove period setting updated: $enabled');
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _removePeriod = previous;
+        _settingsBusy = false;
+      });
+      _addLog('Failed to update remove period setting: $e');
+    }
+  }
+
+  Future<Map<String, dynamic>> _readBackendConfigMap() async {
+    final file = _backendConfigFile();
+    if (!await file.exists()) {
+      return <String, dynamic>{};
+    }
+    final raw = await file.readAsString();
+    if (raw.trim().isEmpty) {
+      return <String, dynamic>{};
+    }
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map) {
+      throw const FormatException('backend config must be a JSON object');
+    }
+    return _stringDynamicMap(decoded);
+  }
+
+  Map<String, dynamic> _mergeConfigWithRemovePeriod(
+    Map<String, dynamic> config,
+    bool enabled,
+  ) {
+    final merged = Map<String, dynamic>.from(config);
+    final output = _stringDynamicMap(merged['output']);
+    output['remove_period'] = enabled;
+    merged['output'] = output;
+    return merged;
+  }
+
+  Future<void> _writeBackendConfigAtomically(
+      Map<String, dynamic> config) async {
+    final file = _backendConfigFile();
+    await file.parent.create(recursive: true);
+    final tempName =
+        '.${file.uri.pathSegments.last}.tmp.$pid.${DateTime.now().microsecondsSinceEpoch}';
+    final tempFile = File('${file.parent.path}/$tempName');
+    final payload = '${const JsonEncoder.withIndent('  ').convert(config)}\n';
+    await tempFile.writeAsString(payload, flush: true);
+    await tempFile.rename(file.path);
+  }
+
+  Map<String, dynamic> _stringDynamicMap(Object? value) {
+    if (value is Map<String, dynamic>) {
+      return Map<String, dynamic>.from(value);
+    }
+    if (value is Map) {
+      final normalized = <String, dynamic>{};
+      for (final entry in value.entries) {
+        normalized[entry.key.toString()] = entry.value;
+      }
+      return normalized;
+    }
+    return <String, dynamic>{};
+  }
+
   Future<void> _showWindowFromTray() async {
     try {
       await windowManager.setSkipTaskbar(false);
@@ -322,6 +682,7 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
       return;
     }
     _isQuitting = true;
+    await _stopManagedBackendIfNeeded();
     try {
       await trayManager.destroy();
     } catch (_) {
@@ -386,12 +747,8 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
   }
 
   Future<void> _ping() async {
-    try {
-      final resp = await _client.send(<String, dynamic>{'cmd': 'ping'});
-      _addLog('Daemon ping: ${resp['ok'] == true ? 'OK' : 'FAILED'}');
-    } catch (e) {
-      _addLog('Daemon ping failed: $e');
-    }
+    final ok = await _daemonPing();
+    _addLog('Daemon ping: ${ok ? 'OK' : 'FAILED'}');
   }
 
   Future<void> _onF2Down() async {
@@ -404,6 +761,11 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
 
   Future<void> _startRecording() async {
     if (_recording || _busy) {
+      return;
+    }
+    await _ensureBackendRunning();
+    if (!await _daemonPing()) {
+      _addLog('Start aborted: backend unavailable');
       return;
     }
     setState(() {
@@ -733,6 +1095,20 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
                   ? null
                   : (bool? value) {
                       unawaited(_setAutostartEnabled(value ?? false));
+                    },
+            ),
+            const SizedBox(height: 4),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('去除句号'),
+              subtitle: Text(
+                _settingsBusy ? '读写中...' : (_removePeriod ? '已启用' : '已关闭'),
+              ),
+              value: _removePeriod,
+              onChanged: _settingsBusy
+                  ? null
+                  : (bool value) {
+                      unawaited(_setRemovePeriodEnabled(value));
                     },
             ),
             const SizedBox(height: 12),

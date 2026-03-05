@@ -40,7 +40,6 @@ https://github.com/user-attachments/assets/94772920-0f9e-4dff-8da5-c9026eb23256
 
 ```bash
 bash scripts/install-flutter_vocotype.sh
-systemctl --user enable --now vocotype-fcitx5-backend.service
 vocotype-flutter
 ```
 
