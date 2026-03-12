@@ -126,6 +126,7 @@ class Fcitx5Backend:
         self._audio_sample_rate = DEFAULT_NATIVE_SAMPLE_RATE
         self._audio_input_channel = DEFAULT_INPUT_CHANNEL
         self._reload_audio_input_config()
+        self._warmup_recorder()
 
         # 注册信号处理
         signal.signal(signal.SIGTERM, self._signal_handler)
@@ -172,6 +173,39 @@ class Fcitx5Backend:
         self._audio_device = device
         self._audio_sample_rate = sample_rate
         self._audio_input_channel = input_channel
+
+    def _build_recorder(self) -> AudioRecorder:
+        return AudioRecorder(
+            device=self._audio_device,
+            sample_rate=self._audio_sample_rate,
+            input_channel=self._audio_input_channel,
+        )
+
+    def _ensure_recorder_locked(self) -> AudioRecorder:
+        recorder = self._recorder
+        if recorder is not None and recorder.matches_config(
+            self._audio_device,
+            self._audio_sample_rate,
+            self._audio_input_channel,
+        ):
+            return recorder
+
+        if recorder is not None:
+            recorder.cleanup()
+
+        recorder = self._build_recorder()
+        self._recorder = recorder
+        return recorder
+
+    def _warmup_recorder(self) -> None:
+        with self._record_lock:
+            if self._recording:
+                return
+            recorder = self._ensure_recorder_locked()
+        try:
+            recorder.prepare()
+        except Exception as exc:
+            logger.warning("音频输入流预热失败: %s", exc)
 
     def _current_audio_input_state(self) -> dict:
         state = {
@@ -274,6 +308,8 @@ class Fcitx5Backend:
         self._audio_device = device
         self._audio_sample_rate = sample_rate
         self._audio_input_channel = resolved_input_channel
+        if not self._recording:
+            self._warmup_recorder()
         state = self._current_audio_input_state()
         return {
             "ok": True,
@@ -521,11 +557,7 @@ class Fcitx5Backend:
                 return {"ok": True, "recording": True}
 
             self._reload_audio_input_config()
-            recorder = AudioRecorder(
-                device=self._audio_device,
-                sample_rate=self._audio_sample_rate,
-                input_channel=self._audio_input_channel,
-            )
+            recorder = self._ensure_recorder_locked()
             try:
                 recorder.start()
             except Exception as exc:
@@ -540,7 +572,6 @@ class Fcitx5Backend:
             recorder = self._recorder
             if recorder is None or not self._recording:
                 return {"ok": False, "error": "not_recording"}
-            self._recorder = None
             self._recording = False
 
         try:
@@ -587,6 +618,8 @@ class Fcitx5Backend:
         """清理资源"""
         logger.info("正在清理资源...")
         try:
+            if self._recorder is not None:
+                self._recorder.cleanup()
             self.asr_server.cleanup()
             self.rime_handler.cleanup()
         except Exception as exc:

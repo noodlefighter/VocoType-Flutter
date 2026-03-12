@@ -14,9 +14,9 @@ from __future__ import annotations
 import sys
 import argparse
 import tempfile
-import queue
 import threading
 import logging
+import time
 from pathlib import Path
 
 import numpy as np
@@ -54,12 +54,26 @@ class AudioRecorder:
         self.sample_rate = sample_rate
         self.input_channel = max(int(input_channel), 0)
         self.audio_frames: list[np.ndarray] = []
-        self.audio_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=500)
-        self.stop_event = threading.Event()
         self.stream: sd.InputStream | None = None
-        self.capture_thread: threading.Thread | None = None
         self.active_sample_rate: int | None = None
         self.active_input_channel: int = 0
+        self.active_device: int | str | None = None
+        self._state_lock = threading.Lock()
+        self._recording = False
+        self._record_started_at: float | None = None
+        self._first_frame_logged = False
+
+    def matches_config(
+        self,
+        device: int | str | None,
+        sample_rate: int,
+        input_channel: int,
+    ) -> bool:
+        return (
+            self.device == device
+            and self.sample_rate == sample_rate
+            and self.input_channel == max(int(input_channel), 0)
+        )
 
     def _resolve_input_device(self):
         """选择可用的输入设备"""
@@ -114,22 +128,17 @@ class AudioRecorder:
 
         return preferred or SAMPLE_RATE
 
-    def start(self) -> None:
-        """开始录音（非阻塞）"""
-        if self.stream is not None:
+    def prepare(self) -> None:
+        """预热输入流，避免首轮录音时重新打开设备。"""
+        if self.stream is not None and getattr(self.stream, "active", False):
             return
-
-        self.audio_frames.clear()
-        while not self.audio_queue.empty():
-            try:
-                self.audio_queue.get_nowait()
-            except queue.Empty:
-                break
-        self.stop_event.clear()
+        if self.stream is not None:
+            self.cleanup()
 
         device = self._resolve_input_device()
         input_channel = self._resolve_input_channel(device)
         sample_rate = self._resolve_sample_rate(device, self.sample_rate, input_channel)
+        self.active_device = device
         self.active_sample_rate = sample_rate
         self.active_input_channel = input_channel
 
@@ -146,14 +155,18 @@ class AudioRecorder:
         def audio_callback(indata, frame_count, time_info, status):
             if status:
                 logger.warning("音频状态: %s", status)
-            if indata.ndim > 1:
-                frame = indata[:, self.active_input_channel].copy()
-            else:
-                frame = indata.copy().reshape(-1)
-            try:
-                self.audio_queue.put_nowait(frame)
-            except queue.Full:
-                pass
+            with self._state_lock:
+                if not self._recording:
+                    return
+                if indata.ndim > 1:
+                    frame = indata[:, self.active_input_channel].copy()
+                else:
+                    frame = indata.copy().reshape(-1)
+                self.audio_frames.append(frame)
+                if not self._first_frame_logged and self._record_started_at is not None:
+                    startup_ms = (time.perf_counter() - self._record_started_at) * 1000
+                    self._first_frame_logged = True
+                    logger.info("首帧到达，录音启动延迟: %.1f ms", startup_ms)
 
         self.stream = sd.InputStream(
             samplerate=sample_rate,
@@ -164,19 +177,18 @@ class AudioRecorder:
             callback=audio_callback,
         )
         self.stream.start()
+        logger.info("音频输入流已预热")
 
-        def capture_loop():
-            while True:
-                try:
-                    frame = self.audio_queue.get(timeout=0.1)
-                    self.audio_frames.append(frame)
-                except queue.Empty:
-                    if self.stop_event.is_set():
-                        break
-                    continue
+    def start(self) -> None:
+        """开始录音（非阻塞）"""
+        self.prepare()
 
-        self.capture_thread = threading.Thread(target=capture_loop, daemon=True)
-        self.capture_thread.start()
+        with self._state_lock:
+            self.audio_frames.clear()
+            self._recording = True
+            self._record_started_at = time.perf_counter()
+            self._first_frame_logged = False
+
         logger.info("开始录音...")
 
     def stop(self) -> Path | None:
@@ -184,32 +196,23 @@ class AudioRecorder:
         if self.stream is None or self.active_sample_rate is None:
             return None
 
-        try:
-            self.stream.stop()
-            self.stream.close()
-        finally:
-            self.stream = None
+        with self._state_lock:
+            if not self._recording:
+                return None
+            self._recording = False
+            self._record_started_at = None
+            self._first_frame_logged = False
+            frames = self.audio_frames
+            self.audio_frames = []
 
-        self.stop_event.set()
+        logger.info("录音完成，共 %d 帧", len(frames))
 
-        if self.capture_thread is not None:
-            self.capture_thread.join(timeout=1.0)
-            self.capture_thread = None
-
-        while True:
-            try:
-                self.audio_frames.append(self.audio_queue.get_nowait())
-            except queue.Empty:
-                break
-
-        logger.info("录音完成，共 %d 帧", len(self.audio_frames))
-
-        if not self.audio_frames:
+        if not frames:
             logger.error("没有录制到音频数据")
             return None
 
         sample_rate = self.active_sample_rate
-        audio_data = np.concatenate(self.audio_frames).flatten()
+        audio_data = np.concatenate(frames).flatten()
         audio_duration = len(audio_data) / sample_rate
         logger.info("录音时长: %.2f 秒", audio_duration)
 
@@ -230,12 +233,37 @@ class AudioRecorder:
 
         return temp_path
 
+    def cleanup(self) -> None:
+        """关闭预热中的输入流。"""
+        with self._state_lock:
+            self._recording = False
+            self._record_started_at = None
+            self._first_frame_logged = False
+            self.audio_frames.clear()
+
+        stream = self.stream
+        self.stream = None
+        self.active_device = None
+        self.active_sample_rate = None
+        self.active_input_channel = 0
+        if stream is None:
+            return
+
+        try:
+            stream.stop()
+        except Exception:
+            pass
+        try:
+            stream.close()
+        except Exception:
+            pass
+
     def record(self, duration: float | None = None) -> Path:
         """录制音频（阻塞）"""
         self.start()
 
         if duration:
-            self.stop_event.wait(timeout=duration)
+            time.sleep(duration)
         else:
             sys.stdin.read()
 
@@ -300,11 +328,10 @@ def main():
                         print("", flush=True)
                         continue
                     audio_path = recorder.stop()
-                    recorder = None
                     print("" if audio_path is None else audio_path, flush=True)
                 elif cmd == "QUIT":
                     if recorder is not None:
-                        recorder.stop()
+                        recorder.cleanup()
                     break
         except KeyboardInterrupt:
             logger.info("录音被中断")
