@@ -14,6 +14,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "sample_rate": 16000,
         "block_ms": 20,
         "device": None,
+        "input_channel": 0,
         # 单次录音的最大大小（字节），默认20MB
         # 达到此限制后将自动停止录音并开始转录
         "max_session_bytes": 20 * 1024 * 1024,
@@ -90,4 +91,3 @@ def ensure_logging_dir(config: Dict[str, Any]) -> str:
     
     os.makedirs(log_dir, exist_ok=True)
     return log_dir
-

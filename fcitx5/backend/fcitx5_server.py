@@ -19,6 +19,8 @@ import threading
 from pathlib import Path
 from dataclasses import asdict, dataclass
 
+import sounddevice as sd
+
 # 添加项目根目录到 path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -28,7 +30,14 @@ from app.funasr_server import FunASRServer
 from app.logging_config import setup_logging
 from backend.rime_handler import RimeHandler
 from backend.audio_recorder import AudioRecorder
-from app.audio_utils import load_audio_config
+from app.audio_utils import (
+    DEFAULT_INPUT_CHANNEL,
+    DEFAULT_NATIVE_SAMPLE_RATE,
+    list_input_devices,
+    load_audio_input_config,
+    resolve_input_channel,
+    resolve_input_device,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -107,15 +116,16 @@ class Fcitx5Backend:
         self._recording = False
         self._result_seq = 0
         self._last_result: ResultEnvelope | None = None
-        self._audio_device, self._audio_sample_rate = load_audio_config()
-        if isinstance(self._audio_device, str) and self._audio_device.isdigit():
-            self._audio_device = int(self._audio_device)
         self._config_lock = threading.Lock()
         self._config_path = os.path.expanduser(
             os.environ.get("VOCOTYPE_FCITX5_CONFIG", DEFAULT_CONFIG_PATH)
         )
         self._config_mtime: float | None = None
         self._runtime_config = copy.deepcopy(DEFAULT_CONFIG)
+        self._audio_device: int | str | None = None
+        self._audio_sample_rate = DEFAULT_NATIVE_SAMPLE_RATE
+        self._audio_input_channel = DEFAULT_INPUT_CHANNEL
+        self._reload_audio_input_config()
 
         # 注册信号处理
         signal.signal(signal.SIGTERM, self._signal_handler)
@@ -156,6 +166,121 @@ class Fcitx5Backend:
         if not bool(output_cfg.get("remove_period", False)):
             return text
         return re.sub(r"[。.]+$", "", text)
+
+    def _reload_audio_input_config(self) -> None:
+        device, sample_rate, input_channel = load_audio_input_config(self._config_path)
+        self._audio_device = device
+        self._audio_sample_rate = sample_rate
+        self._audio_input_channel = input_channel
+
+    def _current_audio_input_state(self) -> dict:
+        state = {
+            "device": self._audio_device,
+            "sample_rate": self._audio_sample_rate,
+            "input_channel": self._audio_input_channel,
+        }
+        resolved_device = resolve_input_device(sd, self._audio_device)
+        state["resolved_device"] = resolved_device
+
+        try:
+            info = sd.query_devices(
+                resolved_device if resolved_device is not None else None,
+                kind="input",
+            )
+        except Exception as exc:
+            state["resolution_error"] = str(exc)
+            return state
+
+        max_input_channels = int(info.get("max_input_channels", 0) or 0)
+        state.update(
+            {
+                "resolved_device_name": str(info.get("name", "")),
+                "max_input_channels": max_input_channels,
+                "default_sample_rate": int(info.get("default_samplerate", 0) or 0),
+                "resolved_input_channel": resolve_input_channel(
+                    self._audio_input_channel,
+                    max_input_channels,
+                ),
+            }
+        )
+        return state
+
+    def _list_audio_inputs(self) -> dict:
+        self._reload_audio_input_config()
+        return {
+            "ok": True,
+            "devices": list_input_devices(sd),
+            "current": self._current_audio_input_state(),
+            "recording": self._recording,
+        }
+
+    def _set_audio_input(self, request: dict) -> dict:
+        device = request.get("device")
+        if isinstance(device, str):
+            device = device.strip() or None
+            if device and device.isdigit():
+                device = int(device)
+        elif device is not None and not isinstance(device, int):
+            device = str(device)
+
+        try:
+            sample_rate = int(request.get("sample_rate", self._audio_sample_rate))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "invalid_sample_rate"}
+        if sample_rate <= 0:
+            return {"ok": False, "error": "invalid_sample_rate"}
+
+        try:
+            input_channel = int(request.get("input_channel", self._audio_input_channel))
+        except (TypeError, ValueError):
+            return {"ok": False, "error": "invalid_input_channel"}
+        if input_channel < 0:
+            return {"ok": False, "error": "invalid_input_channel"}
+
+        available_devices = list_input_devices(sd)
+        if device is not None:
+            matched = False
+            for candidate in available_devices:
+                if isinstance(device, int) and candidate.get("id") == device:
+                    matched = True
+                    break
+                if isinstance(device, str) and candidate.get("name") == device:
+                    matched = True
+                    break
+            if not matched:
+                return {"ok": False, "error": "device_unavailable"}
+
+        resolved_device = resolve_input_device(sd, device)
+        try:
+            info = sd.query_devices(
+                resolved_device if resolved_device is not None else None,
+                kind="input",
+            )
+        except Exception as exc:
+            return {"ok": False, "error": f"device_query_failed: {exc}"}
+
+        max_input_channels = int(info.get("max_input_channels", 0) or 0)
+        if max_input_channels <= 0:
+            return {"ok": False, "error": "no_input_channels"}
+
+        resolved_input_channel = resolve_input_channel(input_channel, max_input_channels)
+        if resolved_input_channel != input_channel:
+            return {
+                "ok": False,
+                "error": f"invalid_input_channel:{input_channel}",
+                "max_input_channels": max_input_channels,
+            }
+
+        self._audio_device = device
+        self._audio_sample_rate = sample_rate
+        self._audio_input_channel = resolved_input_channel
+        state = self._current_audio_input_state()
+        return {
+            "ok": True,
+            "applied_now": not self._recording,
+            "recording": self._recording,
+            "current": state,
+        }
 
     def _apply_asr_postprocess(self, asr_result: dict) -> dict:
         if not asr_result.get("success"):
@@ -375,7 +500,14 @@ class Fcitx5Backend:
                 "transcribing": False,
                 "stats": {"transcription_count": self.asr_server.transcription_count},
                 "last_result": asdict(self._last_result) if self._last_result else None,
+                "audio": self._current_audio_input_state(),
             }
+
+        if cmd == "list_audio_inputs":
+            return self._list_audio_inputs()
+
+        if cmd == "set_audio_input":
+            return self._set_audio_input(request)
 
         if cmd == "shutdown":
             self.running = False
@@ -388,9 +520,11 @@ class Fcitx5Backend:
             if self._recording:
                 return {"ok": True, "recording": True}
 
+            self._reload_audio_input_config()
             recorder = AudioRecorder(
                 device=self._audio_device,
                 sample_rate=self._audio_sample_rate,
+                input_channel=self._audio_input_channel,
             )
             try:
                 recorder.start()

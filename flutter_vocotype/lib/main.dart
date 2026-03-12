@@ -15,6 +15,56 @@ const String _kBackendConfigRelativePath =
     '.config/vocotype/fcitx5-backend.json';
 const String _kBackendRuntimeEnv = 'VOCOTYPE_BACKEND_RUNTIME';
 
+int _intFromDynamic(Object? value, {int fallback = 0}) {
+  if (value is int) {
+    return value;
+  }
+  if (value is num) {
+    return value.toInt();
+  }
+  if (value is String) {
+    return int.tryParse(value) ?? fallback;
+  }
+  return fallback;
+}
+
+String? _trimmedStringOrNull(Object? value) {
+  if (value == null) {
+    return null;
+  }
+  final text = value.toString().trim();
+  return text.isEmpty ? null : text;
+}
+
+class AudioInputDevice {
+  const AudioInputDevice({
+    required this.id,
+    required this.name,
+    required this.maxInputChannels,
+    required this.defaultSampleRate,
+  });
+
+  factory AudioInputDevice.fromJson(Map<String, dynamic> json) {
+    final maxInputChannels =
+        _intFromDynamic(json['max_input_channels'], fallback: 1);
+    final defaultSampleRate =
+        _intFromDynamic(json['default_sample_rate'], fallback: 44100);
+    return AudioInputDevice(
+      id: _intFromDynamic(json['id']),
+      name: _trimmedStringOrNull(json['name']) ?? 'Unknown input',
+      maxInputChannels: maxInputChannels > 0 ? maxInputChannels : 1,
+      defaultSampleRate: defaultSampleRate > 0 ? defaultSampleRate : 44100,
+    );
+  }
+
+  final int id;
+  final String name;
+  final int maxInputChannels;
+  final int defaultSampleRate;
+
+  String get label => '[$id] $name';
+}
+
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await windowManager.ensureInitialized();
@@ -158,9 +208,15 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
   bool _autostartBusy = true;
   bool _removePeriod = false;
   bool _settingsBusy = true;
+  bool _audioInputBusy = true;
   bool _isQuitting = false;
   TypeBackend _typeBackend = _typeBackendFromEnv();
   String _lastText = '';
+  List<AudioInputDevice> _audioInputDevices = const <AudioInputDevice>[];
+  String? _selectedAudioDeviceName;
+  String? _resolvedAudioDeviceName;
+  int _selectedAudioInputChannel = 0;
+  int _selectedAudioSampleRate = 44100;
   HotKey? _hotKey;
   Process? _managedBackendProcess;
   bool _backendStartedByApp = false;
@@ -310,7 +366,10 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
 
   Future<void> _bootstrapRuntime() async {
     await _ensureBackendRunning();
-    await _loadRemovePeriodSetting();
+    await Future.wait<void>(<Future<void>>[
+      _loadRemovePeriodSetting(),
+      _loadAudioInputSettings(),
+    ]);
     await _ping();
   }
 
@@ -631,6 +690,21 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     return merged;
   }
 
+  Map<String, dynamic> _mergeConfigWithAudioInput(
+    Map<String, dynamic> config, {
+    required String deviceName,
+    required int sampleRate,
+    required int inputChannel,
+  }) {
+    final merged = Map<String, dynamic>.from(config);
+    final audio = _stringDynamicMap(merged['audio']);
+    audio['device'] = deviceName;
+    audio['sample_rate'] = sampleRate;
+    audio['input_channel'] = inputChannel;
+    merged['audio'] = audio;
+    return merged;
+  }
+
   Future<void> _writeBackendConfigAtomically(
       Map<String, dynamic> config) async {
     final file = _backendConfigFile();
@@ -655,6 +729,250 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
       return normalized;
     }
     return <String, dynamic>{};
+  }
+
+  AudioInputDevice? _audioInputDeviceFromList(
+    List<AudioInputDevice> devices,
+    String? name,
+  ) {
+    if (name == null || name.isEmpty) {
+      return null;
+    }
+    for (final device in devices) {
+      if (device.name == name) {
+        return device;
+      }
+    }
+    return null;
+  }
+
+  AudioInputDevice? _audioInputDeviceByName(String? name) {
+    return _audioInputDeviceFromList(_audioInputDevices, name);
+  }
+
+  AudioInputDevice? get _selectedAudioInputDevice {
+    return _audioInputDeviceByName(_selectedAudioDeviceName);
+  }
+
+  int _clampAudioInputChannel(AudioInputDevice? device, int channel) {
+    if (device == null) {
+      return 0;
+    }
+    if (channel < 0) {
+      return 0;
+    }
+    if (channel >= device.maxInputChannels) {
+      return device.maxInputChannels - 1;
+    }
+    return channel;
+  }
+
+  List<int> _availableAudioInputChannels(AudioInputDevice? device) {
+    if (device == null) {
+      return const <int>[];
+    }
+    return List<int>.generate(device.maxInputChannels, (int index) => index);
+  }
+
+  String? _resolveAudioDeviceName(
+    List<AudioInputDevice> devices,
+    Map<String, dynamic> current,
+  ) {
+    final configuredName = _trimmedStringOrNull(current['device']);
+    final configuredMatch = _audioInputDeviceFromList(devices, configuredName);
+    if (configuredMatch != null) {
+      return configuredMatch.name;
+    }
+
+    final resolvedName = _trimmedStringOrNull(current['resolved_device_name']);
+    final resolvedMatch = _audioInputDeviceFromList(devices, resolvedName);
+    if (resolvedMatch != null) {
+      return resolvedMatch.name;
+    }
+
+    if (devices.isNotEmpty) {
+      return devices.first.name;
+    }
+    return configuredName ?? resolvedName;
+  }
+
+  String _audioInputSummary() {
+    if (_audioInputBusy) {
+      return '正在读取音频输入设置...';
+    }
+
+    final device = _selectedAudioInputDevice;
+    if (device == null) {
+      return _audioInputDevices.isEmpty ? '未检测到可用的音频输入设备' : '当前音频源不可用，请刷新后重试';
+    }
+
+    final resolvedName = _resolvedAudioDeviceName;
+    final sourceLabel = resolvedName == null || resolvedName == device.name
+        ? device.label
+        : '$resolvedName (${device.label})';
+    final applyBehavior = _recording ? '录音中切换将在下一次录音时生效' : '切换后无需重启';
+    return '$sourceLabel · 通道 ${_selectedAudioInputChannel + 1}/${device.maxInputChannels} · '
+        '${_selectedAudioSampleRate}Hz · $applyBehavior';
+  }
+
+  Future<void> _loadAudioInputSettings({bool showBusy = true}) async {
+    if (showBusy && mounted) {
+      setState(() {
+        _audioInputBusy = true;
+      });
+    }
+
+    try {
+      await _ensureBackendRunning();
+      final resp = await _client.send(<String, dynamic>{
+        'cmd': 'list_audio_inputs',
+      });
+      if (resp['ok'] != true) {
+        throw StateError(
+            resp['error']?.toString() ?? 'list_audio_inputs_failed');
+      }
+
+      final devices = <AudioInputDevice>[];
+      final rawDevices = resp['devices'];
+      if (rawDevices is List) {
+        for (final entry in rawDevices) {
+          if (entry is Map) {
+            devices.add(AudioInputDevice.fromJson(_stringDynamicMap(entry)));
+          }
+        }
+      }
+
+      final current = _stringDynamicMap(resp['current']);
+      final selectedDeviceName = _resolveAudioDeviceName(devices, current);
+      final selectedDevice =
+          _audioInputDeviceFromList(devices, selectedDeviceName);
+      final selectedChannel = _clampAudioInputChannel(
+        selectedDevice,
+        _intFromDynamic(current['input_channel']),
+      );
+      final fallbackSampleRate = selectedDevice?.defaultSampleRate ?? 44100;
+      final sampleRate = _intFromDynamic(
+        current['sample_rate'],
+        fallback: fallbackSampleRate,
+      );
+
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _audioInputDevices = devices;
+        _selectedAudioDeviceName = selectedDeviceName;
+        _resolvedAudioDeviceName =
+            _trimmedStringOrNull(current['resolved_device_name']);
+        _selectedAudioInputChannel = selectedChannel;
+        _selectedAudioSampleRate =
+            sampleRate > 0 ? sampleRate : fallbackSampleRate;
+        _audioInputBusy = false;
+      });
+      _addLog('Audio inputs loaded: ${devices.length}');
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _audioInputBusy = false;
+      });
+      _addLog('Failed to load audio inputs: $e');
+    }
+  }
+
+  Future<void> _applyAudioInputSelection({
+    String? deviceName,
+    int? inputChannel,
+  }) async {
+    if (_audioInputBusy) {
+      return;
+    }
+
+    final previousDeviceName = _selectedAudioDeviceName;
+    final previousChannel = _selectedAudioInputChannel;
+    final previousSampleRate = _selectedAudioSampleRate;
+    final nextDevice = _audioInputDeviceByName(
+      deviceName ?? _selectedAudioDeviceName,
+    );
+    if (nextDevice == null) {
+      _addLog('Audio input update skipped: no device selected');
+      return;
+    }
+
+    final nextChannel = _clampAudioInputChannel(
+      nextDevice,
+      inputChannel ?? _selectedAudioInputChannel,
+    );
+    final nextSampleRate = nextDevice.defaultSampleRate > 0
+        ? nextDevice.defaultSampleRate
+        : previousSampleRate;
+    if (nextDevice.name == previousDeviceName &&
+        nextChannel == previousChannel &&
+        nextSampleRate == previousSampleRate) {
+      return;
+    }
+
+    setState(() {
+      _audioInputBusy = true;
+      _selectedAudioDeviceName = nextDevice.name;
+      _selectedAudioInputChannel = nextChannel;
+      _selectedAudioSampleRate = nextSampleRate;
+    });
+
+    Map<String, dynamic>? originalConfig;
+    try {
+      originalConfig = await _readBackendConfigMap();
+      final merged = _mergeConfigWithAudioInput(
+        originalConfig,
+        deviceName: nextDevice.name,
+        sampleRate: nextSampleRate,
+        inputChannel: nextChannel,
+      );
+      await _writeBackendConfigAtomically(merged);
+      await _ensureBackendRunning();
+      final resp = await _client.send(<String, dynamic>{
+        'cmd': 'set_audio_input',
+        'device': nextDevice.name,
+        'sample_rate': nextSampleRate,
+        'input_channel': nextChannel,
+      });
+      if (resp['ok'] != true) {
+        throw StateError(resp['error']?.toString() ?? 'set_audio_input_failed');
+      }
+
+      await _loadAudioInputSettings(showBusy: false);
+      final appliedNow = resp['applied_now'] == true;
+      _addLog(
+        'Audio input set: ${nextDevice.label}, channel ${nextChannel + 1}'
+        '${appliedNow ? '' : ' (next recording)'}',
+      );
+      if (!appliedNow && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('录音中的切换会在下一次开始录音时生效')),
+        );
+      }
+    } catch (e) {
+      if (originalConfig != null) {
+        try {
+          await _writeBackendConfigAtomically(originalConfig);
+        } catch (_) {
+          // Ignore rollback failures and keep UI state consistent.
+        }
+      } else {
+        // Ignore rollback failures and keep UI state consistent.
+      }
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _selectedAudioDeviceName = previousDeviceName;
+        _selectedAudioInputChannel = previousChannel;
+        _selectedAudioSampleRate = previousSampleRate;
+        _audioInputBusy = false;
+      });
+      _addLog('Failed to update audio input: $e');
+    }
   }
 
   Future<void> _showWindowFromTray() async {
@@ -1106,6 +1424,87 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
             Text(
               'Effective backend: ${_effectiveBackendForCurrentSession().label}',
             ),
+            const SizedBox(height: 12),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: Text(
+                    '音频输入',
+                    style: Theme.of(context).textTheme.titleSmall,
+                  ),
+                ),
+                TextButton.icon(
+                  onPressed: _audioInputBusy
+                      ? null
+                      : () {
+                          unawaited(_loadAudioInputSettings());
+                        },
+                  icon: const Icon(Icons.refresh, size: 18),
+                  label: const Text('刷新音频源'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            DropdownButtonFormField<String>(
+              initialValue: _selectedAudioInputDevice?.name,
+              isExpanded: true,
+              decoration: const InputDecoration(
+                labelText: '音频源',
+                border: OutlineInputBorder(),
+              ),
+              items: _audioInputDevices
+                  .map(
+                    (AudioInputDevice device) => DropdownMenuItem<String>(
+                      value: device.name,
+                      child: Text(device.label),
+                    ),
+                  )
+                  .toList(),
+              onChanged: (_audioInputBusy || _audioInputDevices.isEmpty)
+                  ? null
+                  : (String? value) {
+                      if (value == null) {
+                        return;
+                      }
+                      unawaited(
+                        _applyAudioInputSelection(
+                          deviceName: value,
+                          inputChannel: 0,
+                        ),
+                      );
+                    },
+            ),
+            const SizedBox(height: 8),
+            DropdownButtonFormField<int>(
+              initialValue: _selectedAudioInputDevice == null
+                  ? null
+                  : _selectedAudioInputChannel,
+              isExpanded: true,
+              decoration: const InputDecoration(
+                labelText: '输入通道',
+                border: OutlineInputBorder(),
+              ),
+              items: _availableAudioInputChannels(_selectedAudioInputDevice)
+                  .map(
+                    (int channel) => DropdownMenuItem<int>(
+                      value: channel,
+                      child: Text('通道 ${channel + 1}'),
+                    ),
+                  )
+                  .toList(),
+              onChanged: (_audioInputBusy || _selectedAudioInputDevice == null)
+                  ? null
+                  : (int? value) {
+                      if (value == null) {
+                        return;
+                      }
+                      unawaited(
+                        _applyAudioInputSelection(inputChannel: value),
+                      );
+                    },
+            ),
+            const SizedBox(height: 4),
+            Text(_audioInputSummary()),
             const SizedBox(height: 12),
             CheckboxListTile(
               contentPadding: EdgeInsets.zero,

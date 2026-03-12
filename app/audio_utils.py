@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 from pathlib import Path
@@ -17,6 +18,9 @@ logger = logging.getLogger(__name__)
 SAMPLE_RATE = 16000
 # 默认原生采样率
 DEFAULT_NATIVE_SAMPLE_RATE = 44100
+DEFAULT_INPUT_CHANNEL = 0
+BACKEND_AUDIO_CONFIG_FILE = Path.home() / ".config" / "vocotype" / "fcitx5-backend.json"
+LEGACY_AUDIO_CONFIG_FILE = Path.home() / ".config" / "vocotype" / "audio.conf"
 
 _HW_SUFFIX_RE = re.compile(r"\s*\(hw:\d+,\d+\)\s*$", re.IGNORECASE)
 _USB_ID_RE = re.compile(r"0x[0-9a-f]+:0x[0-9a-f]+", re.IGNORECASE)
@@ -28,31 +32,133 @@ def load_audio_config() -> tuple[int | str | None, int]:
     Returns:
         (device, sample_rate): 设备（可能为 None、整数 ID 或字符串名称）和采样率
     """
-    config_file = Path.home() / ".config" / "vocotype" / "audio.conf"
+    device, sample_rate, _ = load_audio_input_config()
+    return device, sample_rate
+
+
+def load_audio_input_config(
+    backend_config_path: str | Path | None = None,
+) -> tuple[int | str | None, int, int]:
+    """加载音频输入配置，优先读取前端后端共用的 JSON 配置，回退 legacy audio.conf。"""
+    backend_config = _load_backend_audio_config(backend_config_path)
+    if backend_config is not None:
+        return backend_config
+
+    return _load_legacy_audio_config()
+
+
+def _load_backend_audio_config(
+    backend_config_path: str | Path | None,
+) -> tuple[int | str | None, int, int] | None:
+    config_file = (
+        Path(backend_config_path).expanduser()
+        if backend_config_path is not None
+        else BACKEND_AUDIO_CONFIG_FILE
+    )
     if not config_file.exists():
-        logger.warning("音频配置文件不存在: %s，使用默认设备", config_file)
-        return None, DEFAULT_NATIVE_SAMPLE_RATE
+        return None
+
+    try:
+        decoded = json.loads(config_file.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("读取后端音频配置失败: %s", exc)
+        return None
+
+    if not isinstance(decoded, dict):
+        logger.warning("后端配置格式非法，忽略音频设置: %s", config_file)
+        return None
+
+    audio_cfg = _string_dynamic_map(decoded.get("audio"))
+    if not audio_cfg:
+        return None
+
+    device = _normalize_configured_device(audio_cfg.get("device"))
+    sample_rate = _coerce_positive_int(
+        audio_cfg.get("sample_rate"),
+        DEFAULT_NATIVE_SAMPLE_RATE,
+    )
+    input_channel = _coerce_non_negative_int(
+        audio_cfg.get("input_channel"),
+        DEFAULT_INPUT_CHANNEL,
+    )
+    logger.info(
+        "从后端配置加载: 设备=%s, 采样率=%d, 输入通道=%d",
+        device,
+        sample_rate,
+        input_channel,
+    )
+    return device, sample_rate, input_channel
+
+
+def _load_legacy_audio_config() -> tuple[int | str | None, int, int]:
+    if not LEGACY_AUDIO_CONFIG_FILE.exists():
+        logger.warning("音频配置文件不存在: %s，使用默认设备", LEGACY_AUDIO_CONFIG_FILE)
+        return None, DEFAULT_NATIVE_SAMPLE_RATE, DEFAULT_INPUT_CHANNEL
 
     try:
         import configparser
+
         config = configparser.ConfigParser()
-        config.read(config_file)
+        config.read(LEGACY_AUDIO_CONFIG_FILE)
 
         # 优先使用 device_name（更稳定），回退到 device_id（向后兼容）
-        device_name = config.get('audio', 'device_name', fallback=None)
-        if device_name:
-            sample_rate = config.getint('audio', 'sample_rate', fallback=DEFAULT_NATIVE_SAMPLE_RATE)
-            logger.info("从配置加载: 设备=%s, 采样率=%d", device_name, sample_rate)
-            return device_name, sample_rate
+        device_name = config.get("audio", "device_name", fallback=None)
+        device = device_name or config.getint("audio", "device_id", fallback=None)
+        sample_rate = config.getint(
+            "audio",
+            "sample_rate",
+            fallback=DEFAULT_NATIVE_SAMPLE_RATE,
+        )
+        input_channel = config.getint(
+            "audio",
+            "input_channel",
+            fallback=DEFAULT_INPUT_CHANNEL,
+        )
+        logger.info(
+            "从 legacy 音频配置加载: 设备=%s, 采样率=%d, 输入通道=%d",
+            device,
+            sample_rate,
+            input_channel,
+        )
+        return device, sample_rate, max(input_channel, 0)
+    except Exception as exc:
+        logger.warning("读取音频配置失败: %s，使用默认设备", exc)
+        return None, DEFAULT_NATIVE_SAMPLE_RATE, DEFAULT_INPUT_CHANNEL
 
-        device_id = config.getint('audio', 'device_id', fallback=None)
-        sample_rate = config.getint('audio', 'sample_rate', fallback=DEFAULT_NATIVE_SAMPLE_RATE)
 
-        logger.info("从配置加载: 设备=%s, 采样率=%d", device_id, sample_rate)
-        return device_id, sample_rate
-    except Exception as e:
-        logger.warning("读取音频配置失败: %s，使用默认设备", e)
-        return None, DEFAULT_NATIVE_SAMPLE_RATE
+def _string_dynamic_map(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return {str(key): entry for key, entry in value.items()}
+    return {}
+
+
+def _normalize_configured_device(value: Any) -> int | str | None:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    return text
+
+
+def _coerce_positive_int(value: Any, default: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return number if number > 0 else default
+
+
+def _coerce_non_negative_int(value: Any, default: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return number if number >= 0 else default
 
 
 def _normalize_device_name(name: str) -> str:
@@ -65,6 +171,57 @@ def _extract_usb_id(name: str) -> str | None:
     if not match:
         return None
     return match.group(0).lower()
+
+
+def list_input_devices(sd: Any) -> list[dict[str, Any]]:
+    """枚举所有可录音输入设备及其通道能力。"""
+    try:
+        devices = sd.query_devices()
+    except Exception as exc:
+        logger.warning("查询输入设备列表失败: %s", exc)
+        return []
+
+    results: list[dict[str, Any]] = []
+    for idx, raw in enumerate(devices):
+        info = raw if isinstance(raw, dict) else dict(raw)
+        max_input_channels = _coerce_non_negative_int(
+            info.get("max_input_channels"),
+            0,
+        )
+        if max_input_channels <= 0:
+            continue
+        results.append(
+            {
+                "id": idx,
+                "name": str(info.get("name", "")),
+                "max_input_channels": max_input_channels,
+                "default_sample_rate": _coerce_positive_int(
+                    info.get("default_samplerate"),
+                    DEFAULT_NATIVE_SAMPLE_RATE,
+                ),
+            }
+        )
+    return results
+
+
+def resolve_input_channel(input_channel: int | None, max_input_channels: int) -> int:
+    """将请求的输入通道裁剪到设备能力范围内。"""
+    if max_input_channels <= 0:
+        return DEFAULT_INPUT_CHANNEL
+
+    if input_channel is None:
+        return DEFAULT_INPUT_CHANNEL
+
+    try:
+        channel = int(input_channel)
+    except (TypeError, ValueError):
+        return DEFAULT_INPUT_CHANNEL
+
+    if channel < 0:
+        return DEFAULT_INPUT_CHANNEL
+    if channel >= max_input_channels:
+        return max_input_channels - 1
+    return channel
 
 
 def resolve_input_device(sd: Any, device: int | str | None) -> int | str | None:
