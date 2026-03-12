@@ -37,6 +37,8 @@ from app.wave_writer import write_wav
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
+MIN_TRANSCRIBE_DURATION_SECONDS = 0.3
+
 
 class AudioRecorder:
     """音频录制器（可复用）"""
@@ -126,11 +128,13 @@ class AudioRecorder:
         self.stream.start()
 
         def capture_loop():
-            while not self.stop_event.is_set():
+            while True:
                 try:
                     frame = self.audio_queue.get(timeout=0.1)
                     self.audio_frames.append(frame)
                 except queue.Empty:
+                    if self.stop_event.is_set():
+                        break
                     continue
 
         self.capture_thread = threading.Thread(target=capture_loop, daemon=True)
@@ -142,16 +146,23 @@ class AudioRecorder:
         if self.stream is None or self.active_sample_rate is None:
             return None
 
-        self.stop_event.set()
         try:
             self.stream.stop()
             self.stream.close()
         finally:
             self.stream = None
 
+        self.stop_event.set()
+
         if self.capture_thread is not None:
             self.capture_thread.join(timeout=1.0)
             self.capture_thread = None
+
+        while True:
+            try:
+                self.audio_frames.append(self.audio_queue.get_nowait())
+            except queue.Empty:
+                break
 
         logger.info("录音完成，共 %d 帧", len(self.audio_frames))
 
@@ -164,8 +175,11 @@ class AudioRecorder:
         audio_duration = len(audio_data) / sample_rate
         logger.info("录音时长: %.2f 秒", audio_duration)
 
-        if audio_duration < 0.3:
-            logger.warning("录音时长过短（< 0.3 秒），可能无法识别")
+        if audio_duration < MIN_TRANSCRIBE_DURATION_SECONDS:
+            logger.warning(
+                "录音时长过短（< %.1f 秒），可能无法识别",
+                MIN_TRANSCRIBE_DURATION_SECONDS,
+            )
 
         audio_16k = resample_audio(audio_data, sample_rate, SAMPLE_RATE)
 

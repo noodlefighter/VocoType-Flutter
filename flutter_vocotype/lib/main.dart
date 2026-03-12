@@ -322,7 +322,45 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     return File('$home/$_kBackendConfigRelativePath');
   }
 
+  _BackendLaunchCommand? _resolveDevBackendLaunchCommand() {
+    final cwd = Directory.current.path;
+    final fallbackScripts = <String>[
+      '$cwd/fcitx5/backend/fcitx5_server.py',
+      '$cwd/../fcitx5/backend/fcitx5_server.py',
+    ];
+
+    for (final scriptPath in fallbackScripts) {
+      if (!File(scriptPath).existsSync()) {
+        continue;
+      }
+      final projectDir = File(scriptPath).parent.parent.parent.path;
+      final fallbackPythonCandidates = <String>[
+        '$projectDir/.venv/bin/python',
+        '$cwd/.venv/bin/python',
+        '$cwd/../.venv/bin/python',
+      ];
+      var pythonPath = 'python3';
+      for (final candidate in fallbackPythonCandidates) {
+        if (File(candidate).existsSync()) {
+          pythonPath = candidate;
+          break;
+        }
+      }
+      return _BackendLaunchCommand(
+        pythonPath: pythonPath,
+        scriptPath: scriptPath,
+        runtimeDir: projectDir,
+      );
+    }
+    return null;
+  }
+
   _BackendLaunchCommand? _resolveBackendLaunchCommand() {
+    final devCommand = _resolveDevBackendLaunchCommand();
+    if (devCommand != null) {
+      return devCommand;
+    }
+
     final runtimeDirs = <String>{};
     final envRuntime = Platform.environment[_kBackendRuntimeEnv];
     if (envRuntime != null && envRuntime.isNotEmpty) {
@@ -348,34 +386,6 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
           runtimeDir: runtimeDir,
         );
       }
-    }
-
-    final cwd = Directory.current.path;
-    final fallbackScripts = <String>[
-      '$cwd/fcitx5/backend/fcitx5_server.py',
-      '$cwd/../fcitx5/backend/fcitx5_server.py',
-    ];
-
-    for (final scriptPath in fallbackScripts) {
-      if (!File(scriptPath).existsSync()) {
-        continue;
-      }
-      final fallbackPythonCandidates = <String>[
-        '$cwd/.venv/bin/python',
-        '$cwd/../.venv/bin/python',
-      ];
-      var pythonPath = 'python3';
-      for (final candidate in fallbackPythonCandidates) {
-        if (File(candidate).existsSync()) {
-          pythonPath = candidate;
-          break;
-        }
-      }
-      return _BackendLaunchCommand(
-        pythonPath: pythonPath,
-        scriptPath: scriptPath,
-        runtimeDir: File(scriptPath).parent.parent.parent.path,
-      );
     }
     return null;
   }
@@ -833,6 +843,19 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     });
   }
 
+  Future<void> _copyLogs() async {
+    final text = _logs.join('\n');
+    await Clipboard.setData(ClipboardData(text: text));
+    if (!mounted) {
+      return;
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(text.isEmpty ? '没有可复制的日志' : '日志已复制到剪贴板'),
+      ),
+    );
+  }
+
   Future<void> _typeToFocusedWindow(String text) async {
     if (text.isEmpty) {
       return;
@@ -1130,7 +1153,16 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
               ],
             ),
             const SizedBox(height: 16),
-            const Text('Logs'),
+            Row(
+              children: <Widget>[
+                const Expanded(child: Text('Logs')),
+                TextButton.icon(
+                  onPressed: _copyLogs,
+                  icon: const Icon(Icons.copy_all, size: 18),
+                  label: const Text('复制日志'),
+                ),
+              ],
+            ),
             const SizedBox(height: 8),
             Expanded(
               child: DecoratedBox(
@@ -1147,7 +1179,7 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
                         horizontal: 8,
                         vertical: 4,
                       ),
-                      child: Text(
+                      child: SelectableText(
                         _logs[index],
                         style: const TextStyle(
                           fontFamily: 'monospace',

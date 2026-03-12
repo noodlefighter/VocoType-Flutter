@@ -32,6 +32,8 @@ from app.logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
 
+MIN_ASR_AUDIO_DURATION_SECONDS = 0.3
+
 
 class FunASRServer:
     def __init__(self):
@@ -403,6 +405,13 @@ class FunASRServer:
 
             logger.info(f"开始转录音频文件: {audio_path}")
             duration = self._get_audio_duration(audio_path)
+            if duration < MIN_ASR_AUDIO_DURATION_SECONDS:
+                logger.warning(
+                    "音频时长过短（%.2f 秒 < %.1f 秒），跳过 ASR 以避免空特征错误",
+                    duration,
+                    MIN_ASR_AUDIO_DURATION_SECONDS,
+                )
+                return self._build_empty_result(duration)
 
             # 设置默认选项
             default_options = {
@@ -432,22 +441,7 @@ class FunASRServer:
                 segment_count = len(segments)
                 logger.info("VAD处理完成，检测到 %s 个语音段", segment_count)
                 if segment_count == 0:
-                    self.transcription_count += 1
-                    if self.transcription_count % 10 == 0:
-                        self._cleanup_memory()
-                        logger.info(f"已完成 {self.transcription_count} 次转录，执行内存清理")
-                    return {
-                        "success": True,
-                        "text": "",
-                        "raw_text": "",
-                        "confidence": 0.0,
-                        "duration": duration,
-                        "language": "zh-CN",
-                        "model_type": (
-                            "onnx" if "onnx" in str(self.model_names.get("asr", "")).lower() else "pytorch"
-                        ),
-                        "models": self.model_names,
-                    }
+                    return self._build_empty_result(duration)
 
                 try:
                     import soundfile as sf
@@ -496,6 +490,11 @@ class FunASRServer:
                 else:
                     # ONNX 模型直接调用（funasr_onnx.Paraformer）
                     asr_result = self.asr_model([audio_path_for_asr])
+            except IndexError as exc:
+                if "index 0 is out of bounds" not in str(exc):
+                    raise
+                logger.warning("ASR 特征为空，返回空识别结果: %s", exc)
+                return self._build_empty_result(duration)
             finally:
                 if tmp_vad_path:
                     try:
@@ -573,6 +572,25 @@ class FunASRServer:
             logger.error(error_msg)
             logger.error(traceback.format_exc())
             return {"success": False, "error": error_msg, "type": "transcription_error"}
+
+    def _build_empty_result(self, duration: float) -> dict:
+        self.transcription_count += 1
+        if self.transcription_count % 10 == 0:
+            self._cleanup_memory()
+            logger.info(f"已完成 {self.transcription_count} 次转录，执行内存清理")
+
+        return {
+            "success": True,
+            "text": "",
+            "raw_text": "",
+            "confidence": 0.0,
+            "duration": duration,
+            "language": "zh-CN",
+            "model_type": (
+                "onnx" if "onnx" in str(self.model_names.get("asr", "")).lower() else "pytorch"
+            ),
+            "models": self.model_names,
+        }
 
     def _get_audio_duration(self, audio_path):
         """获取音频时长"""
