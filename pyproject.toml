@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "vocotype-ibus"
+name = "vocotype-flutter-runtime"
 dynamic = ["version"]
-description = "Linux IBus voice input method for VoCoType"
+description = "Python runtime for the VoCoType Flutter Linux frontend"
 readme = { file = "readme.md", content-type = "text/markdown" }
 requires-python = ">=3.11,<3.13"
 license = { file = "LICENSE" }
@@ -18,17 +18,13 @@ dependencies = [
   "soundfile==0.13.1",
   "funasr_onnx==0.4.1",
   "jieba==0.42.1",
-  "PyGObject>=3.42.0,<3.51",
   "modelscope==1.30.0",
-  "torch>=2.9.1",
 ]
 
 [project.optional-dependencies]
-# Rime 拼音输入集成（可选）
 rime = [
   "pyrime>=0.2.1",
 ]
-# 完整功能（语音 + 拼音）
 full = [
   "pyrime>=0.2.1",
 ]
@@ -37,15 +33,13 @@ full = [
 Homepage = "https://github.com/vocotype"
 
 [project.scripts]
-vocotype-ibus = "ibus.main:main"
 vocotype-download-models = "app.download_models:main"
-vocotype-standalone-daemon = "app.standalone.daemon:main"
 
 [tool.setuptools]
 py-modules = ["vocotype_version"]
 
 [tool.setuptools.packages.find]
-include = ["app*", "ibus*"]
+include = ["app*", "backend*"]
 
 [tool.setuptools.dynamic]
 version = { attr = "vocotype_version.__version__" }

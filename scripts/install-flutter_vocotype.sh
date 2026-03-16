@@ -1,5 +1,5 @@
 #!/bin/bash
-# VoCoType Flutter Frontend 安装脚本（复用 Fcitx5 后端）
+# VoCoType Flutter Frontend 安装脚本
 #
 # 用法: install-flutter_vocotype.sh [--device <id>] [--sample-rate <rate>] [--skip-audio] [--skip-build]
 #   --device <id>         指定音频设备 ID，跳过交互式配置
@@ -91,13 +91,13 @@ echo ""
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 1. 检查源码目录
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-echo "[1/8] 检查项目目录..."
+echo "[1/7] 检查项目目录..."
 if [ ! -d "$FRONTEND_SOURCE_DIR" ]; then
     echo "错误: 未找到 Flutter 前端目录: $FRONTEND_SOURCE_DIR"
     exit 1
 fi
-if [ ! -f "$PROJECT_DIR/fcitx5/backend/fcitx5_server.py" ]; then
-    echo "错误: 未找到 Fcitx5 后端: $PROJECT_DIR/fcitx5/backend/fcitx5_server.py"
+if [ ! -f "$PROJECT_DIR/backend/backend_server.py" ]; then
+    echo "错误: 未找到后端服务: $PROJECT_DIR/backend/backend_server.py"
     exit 1
 fi
 echo "✓ 源码目录检查通过"
@@ -106,7 +106,7 @@ echo "✓ 源码目录检查通过"
 # 2. 检查 Flutter 与构建依赖
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 echo ""
-echo "[2/8] 检查 Flutter 与构建依赖..."
+echo "[2/7] 检查 Flutter 与构建依赖..."
 if ! command -v flutter &>/dev/null; then
     echo "错误: 未检测到 Flutter"
     echo "请先安装 Flutter SDK: https://docs.flutter.dev/get-started/install/linux/desktop"
@@ -142,22 +142,21 @@ fi
 echo "✓ Flutter 环境检查通过"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 3. 安装 Python 后端文件（复用 Fcitx5 后端）
+# 3. 安装 Python 后端文件
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 echo ""
-echo "[3/8] 安装 Python 后端文件..."
+echo "[3/7] 安装 Python 后端文件..."
 mkdir -p "$BACKEND_INSTALL_DIR"
 cp -r "$PROJECT_DIR/app" "$BACKEND_INSTALL_DIR/"
-cp -r "$PROJECT_DIR/fcitx5/backend" "$BACKEND_INSTALL_DIR/"
+cp -r "$PROJECT_DIR/backend" "$BACKEND_INSTALL_DIR/"
 cp "$PROJECT_DIR/vocotype_version.py" "$BACKEND_INSTALL_DIR/"
-touch "$BACKEND_INSTALL_DIR/backend/__init__.py"
 echo "✓ 后端文件已安装"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 4. 配置 Python 环境
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 echo ""
-echo "[4/8] 配置 Python 环境..."
+echo "[4/7] 配置 Python 环境..."
 
 if command -v uv &>/dev/null; then
     PYTHON_CMD="$DEFAULT_UV_PYTHON"
@@ -201,7 +200,7 @@ echo "✓ Python 环境已配置"
 # 5. 音频设备配置
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 echo ""
-echo "[5/8] 配置音频设备..."
+echo "[5/7] 配置音频设备..."
 
 if [ -n "$AUDIO_DEVICE" ]; then
     echo "使用指定的音频设备: $AUDIO_DEVICE (采样率: $SAMPLE_RATE)"
@@ -233,44 +232,10 @@ else
 fi
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 6. 迁移清理旧版 systemd 后端
+# 6. 构建并安装 Flutter 前端
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 echo ""
-echo "[6/8] 清理旧版 systemd 后端..."
-LEGACY_BACKEND_LAUNCHER="$HOME/.local/bin/vocotype-fcitx5-backend"
-LEGACY_BACKEND_SERVICE="$HOME/.config/systemd/user/vocotype-fcitx5-backend.service"
-LEGACY_BACKEND_DIR="$HOME/.local/share/vocotype-fcitx5"
-
-if command -v systemctl >/dev/null 2>&1; then
-    if systemctl --user list-unit-files | grep -q "^vocotype-fcitx5-backend.service"; then
-        echo "检测到旧版 systemd 服务，正在停用..."
-        systemctl --user stop vocotype-fcitx5-backend.service >/dev/null 2>&1 || true
-        systemctl --user disable vocotype-fcitx5-backend.service >/dev/null 2>&1 || true
-        systemctl --user daemon-reload >/dev/null 2>&1 || \
-            echo "⚠️  systemctl --user daemon-reload 失败，请手动执行"
-        echo "✓ 旧版 systemd 服务已停用"
-    fi
-fi
-
-if [ -f "$LEGACY_BACKEND_SERVICE" ]; then
-    rm -f "$LEGACY_BACKEND_SERVICE"
-    echo "✓ 已移除旧 service 文件: $LEGACY_BACKEND_SERVICE"
-fi
-
-if [ -f "$LEGACY_BACKEND_LAUNCHER" ]; then
-    rm -f "$LEGACY_BACKEND_LAUNCHER"
-    echo "✓ 已移除旧启动器: $LEGACY_BACKEND_LAUNCHER"
-fi
-
-if [ -d "$LEGACY_BACKEND_DIR" ]; then
-    echo "⚠️  检测到旧后端目录（可按需手动删除）: $LEGACY_BACKEND_DIR"
-fi
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 7. 构建并安装 Flutter 前端
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-echo ""
-echo "[7/8] 构建并安装 Flutter 前端..."
+echo "[6/7] 构建并安装 Flutter 前端..."
 cd "$FRONTEND_SOURCE_DIR"
 flutter pub get
 
@@ -322,7 +287,7 @@ fi
 echo "✓ Flutter 前端已安装"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 8. 完成
+# 7. 完成
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

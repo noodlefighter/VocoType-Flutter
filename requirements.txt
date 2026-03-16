@@ -1,4 +1,4 @@
-# VoCoType Linux IBus 输入法依赖
+# VoCoType Flutter Python runtime dependencies
 # 注：pyproject.toml 为标准安装入口；本文件保留用于 pinned 安装
 
 # 音频采集和处理
@@ -10,12 +10,8 @@ soundfile==0.13.1
 funasr_onnx==0.4.1
 jieba==0.42.1
 
-# IBus Python 绑定 (Linux 必需)
-PyGObject>=3.42.0,<3.51
-
 # 模型下载 (推荐)
 modelscope==1.30.0
 
-# 说明：
-# - 使用 ONNX 路线（onnxruntime）；如需 GPU/PyTorch，请安装 torch(+cu) 与 torchaudio
-# - PyGObject 需要系统包：python3-gi, gir1.2-ibus-1.0, gobject-introspection
+# 可选：
+# - Rime 支持通过 pyproject.toml 的 [full] / [rime] extra 安装

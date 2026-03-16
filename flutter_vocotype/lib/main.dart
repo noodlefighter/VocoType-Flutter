@@ -10,9 +10,8 @@ import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 
 const String _kAutostartAppName = 'Vocotype Flutter';
-const String _kLegacyAutostartAppName = 'VoCoType Fcitx5';
 const String _kBackendConfigRelativePath =
-    '.config/vocotype/fcitx5-backend.json';
+    '.config/vocotype/backend.json';
 const String _kBackendRuntimeEnv = 'VOCOTYPE_BACKEND_RUNTIME';
 
 int _intFromDynamic(Object? value, {int fallback = 0}) {
@@ -68,7 +67,6 @@ class AudioInputDevice {
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await windowManager.ensureInitialized();
-  await _migrateLegacyAutostartEntry();
   launchAtStartup.setup(
     appName: _kAutostartAppName,
     appPath: Platform.resolvedExecutable,
@@ -79,45 +77,6 @@ void main() async {
   });
   await hotKeyManager.unregisterAll();
   runApp(const VoCoTypeApp());
-}
-
-Future<void> _migrateLegacyAutostartEntry() async {
-  if (!Platform.isLinux) {
-    return;
-  }
-  final home = Platform.environment['HOME'];
-  if (home == null || home.isEmpty) {
-    return;
-  }
-
-  final autostartDir = Directory('$home/.config/autostart');
-  final legacyFile =
-      File('${autostartDir.path}/$_kLegacyAutostartAppName.desktop');
-  if (!await legacyFile.exists()) {
-    return;
-  }
-
-  final newFile = File('${autostartDir.path}/$_kAutostartAppName.desktop');
-  if (await newFile.exists()) {
-    return;
-  }
-
-  try {
-    var content = await legacyFile.readAsString();
-    content = content
-        .replaceAll(
-          'Name=$_kLegacyAutostartAppName',
-          'Name=$_kAutostartAppName',
-        )
-        .replaceAll(
-          'Comment=$_kLegacyAutostartAppName startup script',
-          'Comment=$_kAutostartAppName startup script',
-        );
-    await newFile.writeAsString(content);
-    await legacyFile.delete();
-  } catch (_) {
-    // Ignore migration failures.
-  }
 }
 
 class VoCoTypeApp extends StatelessWidget {
@@ -134,7 +93,7 @@ class VoCoTypeApp extends StatelessWidget {
 }
 
 class DaemonClient {
-  DaemonClient({this.socketPath = '/tmp/vocotype-fcitx5.sock'});
+  DaemonClient({this.socketPath = '/tmp/vocotype-backend.sock'});
 
   final String socketPath;
 
@@ -384,8 +343,8 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
   _BackendLaunchCommand? _resolveDevBackendLaunchCommand() {
     final cwd = Directory.current.path;
     final fallbackScripts = <String>[
-      '$cwd/fcitx5/backend/fcitx5_server.py',
-      '$cwd/../fcitx5/backend/fcitx5_server.py',
+      '$cwd/backend/backend_server.py',
+      '$cwd/../backend/backend_server.py',
     ];
 
     for (final scriptPath in fallbackScripts) {
@@ -437,7 +396,7 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
 
     for (final runtimeDir in runtimeDirs) {
       final pythonPath = '$runtimeDir/.venv/bin/python';
-      final scriptPath = '$runtimeDir/backend/fcitx5_server.py';
+      final scriptPath = '$runtimeDir/backend/backend_server.py';
       if (File(pythonPath).existsSync() && File(scriptPath).existsSync()) {
         return _BackendLaunchCommand(
           pythonPath: pythonPath,

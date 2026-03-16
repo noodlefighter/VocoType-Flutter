@@ -1,227 +1,43 @@
 # VoCoType Linux
 
-<h2 align="center">Linux 全平台离线语音输入法</h2>
-
-**VoCoType Linux** 是基于 [VoCoType](https://github.com/233stone/vocotype-cli) 核心引擎开发的 **Linux 离线语音输入方案**，支持 IBus、Fcitx 5 和 Flutter Desktop 三种并行实现。
-
-> **Windows / macOS 用户**：VoCoType 原作者已实现桌面版，请访问 [vocotype.com](https://vocotype.com/)
-
----
-
-## 核心特性
-
-- **100% 离线，隐私无忧** - 所有语音识别在本地完成，不上传任何数据
-- **旗舰级识别引擎** - 基于 FunASR Paraformer 模型，中英混合输入精准
-- **PTT 按键说话** - 按住 F9 说话，松开自动识别并输入
-- **轻量化设计** - 仅需 700MB 内存，纯 CPU 推理，无需显卡
-- **0.1 秒级响应** - 感受所言即所得的畅快体验
-- **可选 Rime 集成** - 需要拼音时可启用 Rime，无需切换输入法
-
-## Demo
-https://github.com/user-attachments/assets/94772920-0f9e-4dff-8da5-c9026eb23256
-
-
-
-## 支持平台
-
-| 实现 | 状态 | 说明 |
-|-----------|------|------|
-| **IBus** | ✅ 完整支持 | 适用于 GNOME、大多数发行版默认 |
-| **Fcitx 5** | ✅ 完整支持 | 适用于 KDE、偏好 Fcitx 的用户 |
-| **Flutter Frontend** | ✅ 可用 | 桌面端前端，复用 Fcitx 5 Python 后端 |
-
-三个实现可以同时安装，核心识别能力共享。
-
----
+Linux 离线语音输入桌面版，当前仓库仅保留 `flutter_vocotype` 前端及其运行所需的 Python 后端。
 
 ## 快速开始
-
-### Flutter Frontend（复用 Fcitx 5 后端）
 
 ```bash
 bash scripts/install-flutter_vocotype.sh
 vocotype-flutter
 ```
 
-详细安装说明：[flutter_vocotype/README.md](flutter_vocotype/README.md)
+详细说明见 [flutter_vocotype/README.md](flutter_vocotype/README.md)。
 
-### IBus 版本
+## 核心特性
 
-```bash
-git clone https://github.com/LeonardNJU/VocoType-linux.git
-cd VocoType-linux
-./scripts/install-ibus.sh
-ibus restart
+- 本地离线识别，不上传音频
+- Flutter 托盘应用，默认热键 `F2`
+- 自动拉起 Python 后端并通过 Unix socket 通信
+- 可选 Rime 集成
+- 支持 `xdotool`、`wtype`、`Shift+Insert` 等文本注入方式
+
+## 仓库结构
+
+```text
+.
+├── flutter_vocotype/      # Flutter Linux 桌面前端
+├── app/                   # 语音识别与音频处理运行时
+├── backend/               # Flutter 复用的 Python socket 后端
+└── scripts/               # Flutter 安装与音频配置脚本
 ```
 
-详细安装说明：[ibus/README.md](ibus/README.md)
+## 环境要求
 
-### Fcitx 5 版本
+- Linux
+- Flutter SDK（启用 Linux desktop）
+- Python 3.11 或 3.12
+- `cmake`、`pkg-config`、`ninja`
 
-```bash
-git clone https://github.com/LeonardNJU/VocoType-linux.git
-cd VocoType-linux
-bash fcitx5/scripts/install-fcitx5.sh
-fcitx5 -r
-```
+## 相关文件
 
-详细安装说明：[fcitx5/README.md](fcitx5/README.md)
-
----
-
-## 重新安装与卸载
-
-### 重新安装
-
-安装脚本支持重复运行，无论是：
-- 安装失败需要重试
-- 升级到新版本
-- 变更安装参数
-
-直接重新运行安装脚本即可，会自动覆盖之前的安装，不会有残留。
-
-### 卸载
-
-**IBus 版本**：
-```bash
-./scripts/uninstall-ibus.sh
-```
-
-卸载时可选择：
-- **快速卸载**（选项 1）：保留 .venv 和模型文件，方便下次安装
-- **完全卸载**（选项 2）：删除所有内容
-
----
-
-## 架构设计
-
-```
-VoCoType Linux
-├── app/                    # 核心引擎（共享）
-│   ├── funasr_server.py    # 语音识别（FunASR）
-│   └── ...
-├── fcitx5/                 # Fcitx 5 版本
-│   ├── addon/              # C++ Addon
-│   ├── backend/            # Python 后端
-│   └── README.md
-├── flutter_vocotype/       # Flutter 桌面前端（复用 fcitx5/backend）
-│   ├── lib/
-│   └── README.md
-└── ibus/                   # IBus 版本
-    ├── engine.py           # IBus 引擎
-    └── README.md
-```
-
-IBus、Fcitx 5 和 Flutter 前端是并列实现，其中 Flutter 前端复用 Fcitx 5 Python 后端。
-
----
-
-## 版本对比
-
-| 特性 | IBus 版本 | Fcitx 5 版本 | Flutter Frontend |
-|-----|----------|-------------|------------------|
-| 交互形态 | IBus 输入法引擎 | Fcitx 5 Addon + 后端 | Flutter 桌面应用 + Fcitx5 后端 |
-| 实现语言 | 纯 Python | C++ + Python (IPC) | Dart + Python (IPC) |
-| 默认热键 | F9 | F9 | F2 |
-| 安装位置 | `~/.local/share/vocotype/` | `~/.local/share/vocotype-fcitx5/` | `~/.local/share/vocotype-flutter_vocotype/` |
-| 适用桌面 | GNOME 等 | KDE 等 | GNOME/KDE/其他桌面 |
-
----
-
-## 使用场景
-
-### 日常应用
-- 聊天通讯：微信、QQ、Telegram、Slack、Discord
-- 文档撰写：文章、报告、邮件、日记、笔记
-- 网页浏览：搜索、表单、评论
-
-### 开发场景
-- 编写代码注释和文档
-- Git Commit Message
-- 与 AI 工具对话（ChatGPT、Claude、Cursor）
-- Issue & PR 描述
-
----
-
-## 核心优势
-
-| 特性 | VoCoType Linux | 云端输入法 |
-|------|---------------|-----------|
-| **隐私安全** | 本地离线，绝不上传 | 数据上传云端 |
-| **网络依赖** | 完全无需联网 | 必须联网 |
-| **响应速度** | 0.1 秒级 | 受网速影响 |
-| **数据安全** | 100% 本地 | 存在泄密风险 |
-
----
-
-## 系统要求
-
-- **操作系统**: Linux (Fedora, Ubuntu, Debian, Arch 等)
-- **Python**: 3.11-3.12（onnxruntime 暂不支持 3.13+）
-- **内存**: 最低 4GB，推荐 8GB
-- **CPU**: 双核以上，无需 GPU
-
-### 资源占用
-
-| 状态 | 内存 | CPU |
-|------|------|-----|
-| 待机 | 200-300MB | ~0% |
-| 录音 | - | 5-10% |
-| 识别 | ~700MB | 100-200%（0.1-0.5秒）|
-
----
-
-## 文档
-
-- [IBus 版本安装指南](ibus/README.md)
-- [Fcitx 5 版本安装指南](fcitx5/README.md)
-- [Flutter Frontend 安装指南](flutter_vocotype/README.md)
-- [Rime 拼音配置指南](RIME_CONFIG_GUIDE.md)（可选功能）
-
----
-
-## 作者
-
-**Leonard Li** - 开发与维护
-
-📧 联系邮箱: [leo@lsamc.website](mailto:leo@lsamc.website)
-
-## 联系我们
-
-- **Bug 与建议**：请使用 GitHub Issues
-- **原项目**：[VoCoType](https://github.com/233stone/vocotype-cli)
-
----
-
-## 致谢
-
-本项目基于以下优秀的开源项目：
-
-- **[VoCoType](https://github.com/233stone/vocotype-cli)** - 原始项目，提供了强大的离线语音识别核心引擎
-- **[FunASR](https://github.com/modelscope/FunASR)** - 阿里巴巴达摩院开源的语音识别框架
-- **[QuQu](https://github.com/yan5xu/ququ)** - 优秀的开源项目，提供了重要的技术参考
-
----
-
-## 第三方依赖与模型许可
-
-本项目依赖的第三方库与模型均受各自许可证约束。详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
-
-使用的模型：
-- `iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-onnx`
-- `iic/speech_fsmn_vad_zh-cn-16k-common-onnx`
-- `iic/punc_ct-transformer_zh-cn-common-vocab272727-onnx`
-
-## 📄 许可证
-
-本项目继承原 VoCoType 项目的许可证。请查看 [LICENSE](LICENSE) 文件了解详情。
-
-## Star History
-
-<a href="https://www.star-history.com/#LeonardNJU/VocoType-ibus&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=LeonardNJU/VocoType-ibus&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=LeonardNJU/VocoType-ibus&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=LeonardNJU/VocoType-ibus&type=date&legend=top-left" />
- </picture>
-</a>
+- [flutter_vocotype/README.md](flutter_vocotype/README.md)
+- [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
+- [LICENSE](LICENSE)

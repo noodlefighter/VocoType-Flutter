@@ -1,7 +1,4 @@
-"""音频处理工具模块
-
-提供音频配置加载和重采样等通用功能，供 IBus 和 Fcitx5 共享使用。
-"""
+"""音频处理工具模块."""
 from __future__ import annotations
 
 import json
@@ -19,7 +16,7 @@ SAMPLE_RATE = 16000
 # 默认原生采样率
 DEFAULT_NATIVE_SAMPLE_RATE = 44100
 DEFAULT_INPUT_CHANNEL = 0
-BACKEND_AUDIO_CONFIG_FILE = Path.home() / ".config" / "vocotype" / "fcitx5-backend.json"
+BACKEND_AUDIO_CONFIG_FILE = Path.home() / ".config" / "vocotype" / "backend.json"
 LEGACY_AUDIO_CONFIG_FILE = Path.home() / ".config" / "vocotype" / "audio.conf"
 
 _HW_SUFFIX_RE = re.compile(r"\s*\(hw:\d+,\d+\)\s*$", re.IGNORECASE)

@@ -605,11 +605,12 @@ class FunASRServer:
             return 0.0
 
     def _patch_audioread_gstreamer_backend(self):
-        """兼容 PyGObject/GStreamer 新版本对 Gst.init(None) 的限制。
+        """兼容部分 GStreamer GI 环境对 Gst.init(None) 的限制。
 
-        audioread.gstdec 在导入时会调用 Gst.init(None)。在部分环境（如
-        PyGObject 3.50+）会抛出 TypeError，导致 librosa.load 间接失败。
-        这里在运行时禁用 audioread 的 GStreamer backend，回退到其它 backend。
+        audioread.gstdec 在导入时会调用 Gst.init(None)。在部分较新的
+        GObject Introspection 运行时里，这一步可能抛出 TypeError，
+        导致 librosa.load 间接失败。这里在运行时禁用 audioread 的
+        GStreamer backend，回退到其它 backend。
         """
         try:
             import audioread

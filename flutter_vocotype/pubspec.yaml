@@ -1,6 +1,6 @@
 name: vocotype_flutter
 publish_to: "none"
-description: Flutter frontend for VoCoType fcitx5 backend runtime.
+description: Flutter frontend for VoCoType backend runtime.
 version: 0.1.0+1
 
 environment:

@@ -136,29 +136,15 @@ class RimeHandler:
 
             try:
                 # 确保日志目录存在
-                log_dir = Path.home() / ".local" / "share" / "vocotype-fcitx5" / "rime"
+                log_dir = Path.home() / ".local" / "share" / "vocotype" / "rime"
                 log_dir.mkdir(parents=True, exist_ok=True)
 
                 from pyrime.api import Traits, API
                 from pyrime.session import Session
 
-                # 按优先级选择用户目录
-                # 1. 优先使用有 default.yaml 的 fcitx5 用户目录
-                # 2. 其次使用有 default.yaml 的 vocotype 目录
-                # 3. 否则使用 fcitx5 目录（如果存在）
-                # 4. 最后使用 vocotype 目录
                 vocotype_user_dir = Path.home() / ".config" / "vocotype" / "rime"
-                fcitx5_user_dir = Path.home() / ".local" / "share" / "fcitx5" / "rime"
-
-                if (fcitx5_user_dir / "default.yaml").exists():
-                    user_data_dir = fcitx5_user_dir
-                elif (vocotype_user_dir / "default.yaml").exists():
-                    user_data_dir = vocotype_user_dir
-                elif fcitx5_user_dir.exists():
-                    user_data_dir = fcitx5_user_dir
-                else:
-                    user_data_dir = vocotype_user_dir
-                    user_data_dir.mkdir(parents=True, exist_ok=True)
+                user_data_dir = vocotype_user_dir
+                user_data_dir.mkdir(parents=True, exist_ok=True)
 
                 # 查找共享数据目录
                 shared_dirs = [
@@ -176,27 +162,23 @@ class RimeHandler:
                     logger.error("找不到 Rime 配置文件（用户和系统目录都缺少 default.yaml）")
                     return False
 
-                # 仅在使用 vocotype 目录时创建符号链接
-                if user_data_dir == vocotype_user_dir:
-                    for subdir in ["build", "lua", "cn_dicts", "en_dicts", "opencc", "others"]:
-                        link_path = user_data_dir / subdir
-                        if link_path.exists() or link_path.is_symlink():
-                            continue
-                        target_path = fcitx5_user_dir / subdir
-                        if not target_path.exists():
-                            target_path = shared_data_dir / subdir
-                        if target_path.exists():
-                            try:
-                                link_path.symlink_to(target_path)
-                                logger.debug("创建 %s 符号链接: %s -> %s", subdir, link_path, target_path)
-                            except OSError as exc:
-                                logger.warning("创建 %s 符号链接失败: %s", subdir, exc)
+                for subdir in ["build", "lua", "cn_dicts", "en_dicts", "opencc", "others"]:
+                    link_path = user_data_dir / subdir
+                    if link_path.exists() or link_path.is_symlink():
+                        continue
+                    target_path = shared_data_dir / subdir
+                    if target_path.exists():
+                        try:
+                            link_path.symlink_to(target_path)
+                            logger.debug("创建 %s 符号链接: %s -> %s", subdir, link_path, target_path)
+                        except OSError as exc:
+                            logger.warning("创建 %s 符号链接失败: %s", subdir, exc)
 
                 install_meta = self._read_installation_metadata(user_data_dir)
-                distribution_name = install_meta.get("distribution_name") or "VoCoType-Fcitx5"
-                distribution_code = install_meta.get("distribution_code_name") or "vocotype-fcitx5"
+                distribution_name = install_meta.get("distribution_name") or "VoCoType"
+                distribution_code = install_meta.get("distribution_code_name") or "vocotype"
                 distribution_version = install_meta.get("distribution_version") or "1.0"
-                app_name = "rime.fcitx5" if distribution_code == "fcitx-rime" else "rime.vocotype.fcitx5"
+                app_name = "rime.vocotype"
 
                 traits = Traits(
                     shared_data_dir=str(shared_data_dir),

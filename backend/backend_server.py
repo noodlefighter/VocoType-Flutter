@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Fcitx 5 Python 后端服务（语音 + Rime）
-
-此服务作为独立进程运行，通过 Unix Socket 接收来自 C++ Addon 的请求，
-提供语音识别和 Rime 拼音输入功能。
-"""
+"""VoCoType Python 后端服务（语音 + Rime）."""
 from __future__ import annotations
 
 import sys
@@ -41,10 +37,10 @@ from app.audio_utils import (
 
 logger = logging.getLogger(__name__)
 
-SOCKET_PATH = "/tmp/vocotype-fcitx5.sock"
+SOCKET_PATH = "/tmp/vocotype-backend.sock"
 MAX_REQUEST_BYTES = 1024 * 1024
 REQUEST_TIMEOUT_S = 2.0
-DEFAULT_CONFIG_PATH = "~/.config/vocotype/fcitx5-backend.json"
+DEFAULT_CONFIG_PATH = "~/.config/vocotype/backend.json"
 
 
 @dataclass
@@ -60,7 +56,7 @@ class ResultEnvelope:
 
 def load_backend_config() -> tuple[dict, str]:
     """Load backend config from user config file if present."""
-    config_path = os.environ.get("VOCOTYPE_FCITX5_CONFIG", DEFAULT_CONFIG_PATH)
+    config_path = os.environ.get("VOCOTYPE_BACKEND_CONFIG", DEFAULT_CONFIG_PATH)
     expanded_path = os.path.expanduser(config_path)
     if not os.path.exists(expanded_path):
         return copy.deepcopy(DEFAULT_CONFIG), expanded_path
@@ -81,13 +77,13 @@ def configure_logging(config: dict, debug: bool) -> None:
     setup_logging(level=level, log_dir=log_dir)
 
 
-class Fcitx5Backend:
-    """Fcitx 5 Python 后端服务
+class VocotypeBackend:
+    """VoCoType Python 后端服务
 
     职责：
     1. 接收语音识别请求，调用 FunASRServer
     2. 接收 Rime 按键请求，调用 RimeHandler
-    3. 通过 IPC 返回结果给 C++ Addon
+    3. 通过 IPC 返回结果给前端
     """
 
     def __init__(self):
@@ -118,7 +114,7 @@ class Fcitx5Backend:
         self._last_result: ResultEnvelope | None = None
         self._config_lock = threading.Lock()
         self._config_path = os.path.expanduser(
-            os.environ.get("VOCOTYPE_FCITX5_CONFIG", DEFAULT_CONFIG_PATH)
+            os.environ.get("VOCOTYPE_BACKEND_CONFIG", DEFAULT_CONFIG_PATH)
         )
         self._config_mtime: float | None = None
         self._runtime_config = copy.deepcopy(DEFAULT_CONFIG)
@@ -364,7 +360,7 @@ class Fcitx5Backend:
         sock.listen(5)
         sock.settimeout(1.0)  # 设置超时以便处理信号
 
-        logger.info("Fcitx5 Backend 已启动，监听: %s", SOCKET_PATH)
+        logger.info("VoCoType Backend 已启动，监听: %s", SOCKET_PATH)
 
         try:
             while self.running:
@@ -374,7 +370,7 @@ class Fcitx5Backend:
                         target=self.handle_client,
                         args=(conn,),
                         daemon=True,
-                        name="Fcitx5BackendClient",
+                        name="VocotypeBackendClient",
                     ).start()
                 except socket.timeout:
                     continue
@@ -387,7 +383,7 @@ class Fcitx5Backend:
                 self._cleanup_socket_path(SOCKET_PATH)
             except RuntimeError as exc:
                 logger.warning("清理 socket 失败: %s", exc)
-            logger.info("Fcitx5 Backend 已停止")
+            logger.info("VoCoType Backend 已停止")
 
     def handle_client(self, conn: socket.socket):
         """处理客户端请求
@@ -632,7 +628,7 @@ def main():
     import argparse
 
     parser = argparse.ArgumentParser(
-        description='VoCoType Fcitx5 Backend Server'
+        description='VoCoType Backend Server'
     )
     parser.add_argument(
         '--socket',
@@ -652,7 +648,7 @@ def main():
 
     SOCKET_PATH = args.socket
 
-    backend = Fcitx5Backend()
+    backend = VocotypeBackend()
     try:
         backend.run()
     except KeyboardInterrupt:
