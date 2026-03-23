@@ -10,8 +10,7 @@ import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 
 const String _kAutostartAppName = 'Vocotype Flutter';
-const String _kBackendConfigRelativePath =
-    '.config/vocotype/backend.json';
+const String _kBackendConfigRelativePath = '.config/vocotype/backend.json';
 const String _kBackendRuntimeEnv = 'VOCOTYPE_BACKEND_RUNTIME';
 
 int _intFromDynamic(Object? value, {int fallback = 0}) {
@@ -44,10 +43,14 @@ class AudioInputDevice {
   });
 
   factory AudioInputDevice.fromJson(Map<String, dynamic> json) {
-    final maxInputChannels =
-        _intFromDynamic(json['max_input_channels'], fallback: 1);
-    final defaultSampleRate =
-        _intFromDynamic(json['default_sample_rate'], fallback: 44100);
+    final maxInputChannels = _intFromDynamic(
+      json['max_input_channels'],
+      fallback: 1,
+    );
+    final defaultSampleRate = _intFromDynamic(
+      json['default_sample_rate'],
+      fallback: 44100,
+    );
     return AudioInputDevice(
       id: _intFromDynamic(json['id']),
       name: _trimmedStringOrNull(json['name']) ?? 'Unknown input',
@@ -255,15 +258,9 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
   Future<void> _updateTrayMenu() async {
     final Menu menu = Menu(
       items: <MenuItem>[
-        MenuItem(
-          key: 'show_window',
-          label: '显示窗口',
-        ),
+        MenuItem(key: 'show_window', label: '显示窗口'),
         MenuItem.separator(),
-        MenuItem(
-          key: 'exit_app',
-          label: '退出',
-        ),
+        MenuItem(key: 'exit_app', label: '退出'),
       ],
     );
     await trayManager.setContextMenu(menu);
@@ -351,7 +348,9 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
       if (!File(scriptPath).existsSync()) {
         continue;
       }
-      final projectDir = File(scriptPath).parent.parent.parent.path;
+      final normalizedScriptPath =
+          File(scriptPath).absolute.resolveSymbolicLinksSync();
+      final projectDir = File(normalizedScriptPath).parent.parent.parent.path;
       final fallbackPythonCandidates = <String>[
         '$projectDir/.venv/bin/python',
         '$cwd/.venv/bin/python',
@@ -387,8 +386,9 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
 
     final home = Platform.environment['HOME'];
     if (home != null && home.isNotEmpty) {
-      runtimeDirs
-          .add('$home/.local/share/vocotype-flutter_vocotype/backend_runtime');
+      runtimeDirs.add(
+        '$home/.local/share/vocotype-flutter_vocotype/backend_runtime',
+      );
     }
 
     final executable = File(Platform.resolvedExecutable);
@@ -503,20 +503,14 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
       process.stdout
           .transform(utf8.decoder)
           .transform(const LineSplitter())
-          .listen(
-            (String line) => _addLog('[backend] $line'),
-            onError: (_) {},
-          )
+          .listen((String line) => _addLog('[backend] $line'), onError: (_) {})
           .asFuture<void>(),
     );
     unawaited(
       process.stderr
           .transform(utf8.decoder)
           .transform(const LineSplitter())
-          .listen(
-            (String line) => _addLog('[backend] $line'),
-            onError: (_) {},
-          )
+          .listen((String line) => _addLog('[backend] $line'), onError: (_) {})
           .asFuture<void>(),
     );
     unawaited(
@@ -665,7 +659,8 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
   }
 
   Future<void> _writeBackendConfigAtomically(
-      Map<String, dynamic> config) async {
+    Map<String, dynamic> config,
+  ) async {
     final file = _backendConfigFile();
     await file.parent.create(recursive: true);
     final tempName =
@@ -788,7 +783,8 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
       });
       if (resp['ok'] != true) {
         throw StateError(
-            resp['error']?.toString() ?? 'list_audio_inputs_failed');
+          resp['error']?.toString() ?? 'list_audio_inputs_failed',
+        );
       }
 
       final devices = <AudioInputDevice>[];
@@ -803,8 +799,10 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
 
       final current = _stringDynamicMap(resp['current']);
       final selectedDeviceName = _resolveAudioDeviceName(devices, current);
-      final selectedDevice =
-          _audioInputDeviceFromList(devices, selectedDeviceName);
+      final selectedDevice = _audioInputDeviceFromList(
+        devices,
+        selectedDeviceName,
+      );
       final selectedChannel = _clampAudioInputChannel(
         selectedDevice,
         _intFromDynamic(current['input_channel']),
@@ -821,8 +819,9 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
       setState(() {
         _audioInputDevices = devices;
         _selectedAudioDeviceName = selectedDeviceName;
-        _resolvedAudioDeviceName =
-            _trimmedStringOrNull(current['resolved_device_name']);
+        _resolvedAudioDeviceName = _trimmedStringOrNull(
+          current['resolved_device_name'],
+        );
         _selectedAudioInputChannel = selectedChannel;
         _selectedAudioSampleRate =
             sampleRate > 0 ? sampleRate : fallbackSampleRate;
@@ -907,9 +906,9 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
         '${appliedNow ? '' : ' (next recording)'}',
       );
       if (!appliedNow && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('录音中的切换会在下一次开始录音时生效')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('录音中的切换会在下一次开始录音时生效')));
       }
     } catch (e) {
       if (originalConfig != null) {
@@ -1127,9 +1126,7 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
       return;
     }
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(text.isEmpty ? '没有可复制的日志' : '日志已复制到剪贴板'),
-      ),
+      SnackBar(content: Text(text.isEmpty ? '没有可复制的日志' : '日志已复制到剪贴板')),
     );
   }
 
@@ -1183,10 +1180,14 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
       if (backend == TypeBackend.wtype) {
         result = await Process.run('wtype', <String>[text]);
       } else {
-        result = await Process.run(
-          'xdotool',
-          <String>['type', '--clearmodifiers', '--delay', '0', '--', text],
-        );
+        result = await Process.run('xdotool', <String>[
+          'type',
+          '--clearmodifiers',
+          '--delay',
+          '0',
+          '--',
+          text,
+        ]);
       }
 
       if (result.exitCode == 0) {
@@ -1242,19 +1243,24 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
 
     try {
       // Send explicit key down/up sequence first to avoid chord parsing issues.
-      final sequenceResult = await Process.run(
-        'xdotool',
-        <String>['keydown', 'Shift_L', 'key', 'Insert', 'keyup', 'Shift_L'],
-      );
+      final sequenceResult = await Process.run('xdotool', <String>[
+        'keydown',
+        'Shift_L',
+        'key',
+        'Insert',
+        'keyup',
+        'Shift_L',
+      ]);
       if (sequenceResult.exitCode == 0) {
         _addLog('Pasted ASR text via Shift+Insert');
         return true;
       }
 
-      final chordResult = await Process.run(
-        'xdotool',
-        <String>['key', '--clearmodifiers', 'Shift_L+Insert'],
-      );
+      final chordResult = await Process.run('xdotool', <String>[
+        'key',
+        '--clearmodifiers',
+        'Shift_L+Insert',
+      ]);
       if (chordResult.exitCode == 0) {
         _addLog('Pasted ASR text via Shift+Insert (chord fallback)');
         return true;
@@ -1302,12 +1308,17 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
   }
 
   Future<Process?> _startSelectionProvider(
-      String selection, String text) async {
+    String selection,
+    String text,
+  ) async {
     try {
-      final process = await Process.start(
-        'xclip',
-        <String>['-selection', selection, '-in', '-loops', '64'],
-      );
+      final process = await Process.start('xclip', <String>[
+        '-selection',
+        selection,
+        '-in',
+        '-loops',
+        '64',
+      ]);
       unawaited(process.stdout.drain<void>());
       unawaited(process.stderr.drain<void>());
       process.stdin.write(text);
@@ -1457,9 +1468,7 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
                       if (value == null) {
                         return;
                       }
-                      unawaited(
-                        _applyAudioInputSelection(inputChannel: value),
-                      );
+                      unawaited(_applyAudioInputSelection(inputChannel: value));
                     },
             ),
             const SizedBox(height: 4),
