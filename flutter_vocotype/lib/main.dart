@@ -12,6 +12,8 @@ import 'package:window_manager/window_manager.dart';
 const String _kAutostartAppName = 'Vocotype Flutter';
 const String _kBackendConfigRelativePath = '.config/vocotype/backend.json';
 const String _kBackendRuntimeEnv = 'VOCOTYPE_BACKEND_RUNTIME';
+const bool _kDefaultRestoreClipboardAfterShiftInsert = true;
+const Duration _kShiftInsertRestoreDelay = Duration(milliseconds: 120);
 
 int _intFromDynamic(Object? value, {int fallback = 0}) {
   if (value is int) {
@@ -22,6 +24,30 @@ int _intFromDynamic(Object? value, {int fallback = 0}) {
   }
   if (value is String) {
     return int.tryParse(value) ?? fallback;
+  }
+  return fallback;
+}
+
+bool _boolFromDynamic(Object? value, {required bool fallback}) {
+  if (value is bool) {
+    return value;
+  }
+  if (value is num) {
+    return value != 0;
+  }
+  if (value is String) {
+    switch (value.trim().toLowerCase()) {
+      case '1':
+      case 'true':
+      case 'yes':
+      case 'on':
+        return true;
+      case '0':
+      case 'false':
+      case 'no':
+      case 'off':
+        return false;
+    }
   }
   return fallback;
 }
@@ -158,6 +184,43 @@ enum TypeBackend {
         return 'Shift+Insert Paste';
     }
   }
+
+  String get configValue {
+    switch (this) {
+      case TypeBackend.auto:
+        return 'auto';
+      case TypeBackend.xdotool:
+        return 'xdotool';
+      case TypeBackend.wtype:
+        return 'wtype';
+      case TypeBackend.shiftInsertPaste:
+        return 'shift_insert_paste';
+    }
+  }
+
+  static TypeBackend fromConfigValue(String? raw) {
+    switch ((raw ?? '').trim().toLowerCase()) {
+      case 'xdotool':
+        return TypeBackend.xdotool;
+      case 'wtype':
+        return TypeBackend.wtype;
+      case 'shift+insert':
+      case 'shift_insert':
+      case 'shift-insert':
+      case 'shiftinsert':
+      case 'shift_insert_paste':
+        return TypeBackend.shiftInsertPaste;
+      case 'auto':
+      default:
+        return TypeBackend.auto;
+    }
+  }
+}
+
+class _ClipboardSnapshot {
+  const _ClipboardSnapshot({required this.text});
+
+  final String? text;
 }
 
 class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
@@ -169,6 +232,8 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
   bool _autostartEnabled = false;
   bool _autostartBusy = true;
   bool _removePeriod = false;
+  bool _restoreClipboardAfterShiftInsert =
+      _kDefaultRestoreClipboardAfterShiftInsert;
   bool _settingsBusy = true;
   bool _audioInputBusy = true;
   bool _isQuitting = false;
@@ -185,24 +250,9 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
   Future<void>? _ensureBackendFuture;
 
   static TypeBackend _typeBackendFromEnv() {
-    final raw = (Platform.environment['VOCOTYPE_TYPE_BACKEND'] ?? '')
-        .trim()
-        .toLowerCase();
-    switch (raw) {
-      case 'xdotool':
-        return TypeBackend.xdotool;
-      case 'wtype':
-        return TypeBackend.wtype;
-      case 'shift+insert':
-      case 'shift_insert':
-      case 'shift-insert':
-      case 'shiftinsert':
-      case 'shift_insert_paste':
-        return TypeBackend.shiftInsertPaste;
-      case 'auto':
-      default:
-        return TypeBackend.auto;
-    }
+    return TypeBackend.fromConfigValue(
+      Platform.environment['VOCOTYPE_TYPE_BACKEND'],
+    );
   }
 
   @override
@@ -323,7 +373,7 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
   Future<void> _bootstrapRuntime() async {
     await _ensureBackendRunning();
     await Future.wait<void>(<Future<void>>[
-      _loadRemovePeriodSetting(),
+      _loadSavedSettings(),
       _loadAudioInputSettings(),
     ]);
     await _ping();
@@ -559,19 +609,34 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     }
   }
 
-  Future<void> _loadRemovePeriodSetting() async {
+  Future<void> _loadSavedSettings() async {
     try {
       final config = await _readBackendConfigMap();
       final output = _stringDynamicMap(config['output']);
-      final enabled = output['remove_period'] == true;
+      final frontend = _stringDynamicMap(config['frontend']);
+      final removePeriodEnabled = output['remove_period'] == true;
+      final restoreClipboardEnabled = _boolFromDynamic(
+        frontend['restore_clipboard_after_shift_insert'],
+        fallback: _kDefaultRestoreClipboardAfterShiftInsert,
+      );
+      final configuredMethod = _trimmedStringOrNull(output['method']);
+      final backend = configuredMethod == null
+          ? _typeBackend
+          : TypeBackend.fromConfigValue(configuredMethod);
       if (!mounted) {
         return;
       }
       setState(() {
-        _removePeriod = enabled;
+        _removePeriod = removePeriodEnabled;
+        _restoreClipboardAfterShiftInsert = restoreClipboardEnabled;
+        _typeBackend = backend;
         _settingsBusy = false;
       });
-      _addLog('Remove period setting loaded: $enabled');
+      _addLog(
+        'Settings loaded: remove_period=$removePeriodEnabled, '
+        'restore_clipboard_after_shift_insert=$restoreClipboardEnabled, '
+        'input_backend=${backend.label}',
+      );
     } catch (e) {
       if (!mounted) {
         return;
@@ -579,7 +644,7 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
       setState(() {
         _settingsBusy = false;
       });
-      _addLog('Failed to load remove period setting: $e');
+      _addLog('Failed to load settings: $e');
     }
   }
 
@@ -616,6 +681,42 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     }
   }
 
+  Future<void> _setShiftInsertRestoreClipboardEnabled(bool enabled) async {
+    if (_settingsBusy) {
+      return;
+    }
+    final previous = _restoreClipboardAfterShiftInsert;
+    setState(() {
+      _restoreClipboardAfterShiftInsert = enabled;
+      _settingsBusy = true;
+    });
+
+    try {
+      final config = await _readBackendConfigMap();
+      final merged = _mergeConfigWithShiftInsertRestoreClipboard(
+        config,
+        enabled,
+      );
+      await _writeBackendConfigAtomically(merged);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _settingsBusy = false;
+      });
+      _addLog('Shift+Insert clipboard restore setting updated: $enabled');
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _restoreClipboardAfterShiftInsert = previous;
+        _settingsBusy = false;
+      });
+      _addLog('Failed to update Shift+Insert clipboard restore setting: $e');
+    }
+  }
+
   Future<Map<String, dynamic>> _readBackendConfigMap() async {
     final file = _backendConfigFile();
     if (!await file.exists()) {
@@ -641,6 +742,65 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     output['remove_period'] = enabled;
     merged['output'] = output;
     return merged;
+  }
+
+  Map<String, dynamic> _mergeConfigWithShiftInsertRestoreClipboard(
+    Map<String, dynamic> config,
+    bool enabled,
+  ) {
+    final merged = Map<String, dynamic>.from(config);
+    final frontend = _stringDynamicMap(merged['frontend']);
+    frontend['restore_clipboard_after_shift_insert'] = enabled;
+    merged['frontend'] = frontend;
+    return merged;
+  }
+
+  Map<String, dynamic> _mergeConfigWithTypeBackend(
+    Map<String, dynamic> config,
+    TypeBackend backend,
+  ) {
+    final merged = Map<String, dynamic>.from(config);
+    final output = _stringDynamicMap(merged['output']);
+    output['method'] = backend.configValue;
+    merged['output'] = output;
+    return merged;
+  }
+
+  Future<void> _setTypeBackend(TypeBackend backend) async {
+    if (_settingsBusy || backend == _typeBackend) {
+      return;
+    }
+
+    final previous = _typeBackend;
+    setState(() {
+      _typeBackend = backend;
+      _settingsBusy = true;
+    });
+
+    try {
+      final config = await _readBackendConfigMap();
+      final merged = _mergeConfigWithTypeBackend(config, backend);
+      await _writeBackendConfigAtomically(merged);
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _settingsBusy = false;
+      });
+      _addLog(
+        'Input backend updated: ${backend.label} '
+        '(effective: ${_effectiveBackendForCurrentSession().label})',
+      );
+    } catch (e) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _typeBackend = previous;
+        _settingsBusy = false;
+      });
+      _addLog('Failed to update input backend: $e');
+    }
   }
 
   Map<String, dynamic> _mergeConfigWithAudioInput(
@@ -1212,6 +1372,7 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
   }
 
   Future<bool> _pasteWithShiftInsert(String text) async {
+    final clipboardSnapshot = await _captureClipboardSnapshot();
     Process? clipboardProvider;
     Process? primaryProvider;
     if (Platform.isLinux) {
@@ -1281,25 +1442,71 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
       _addLog('Shift+Insert failed: $e');
       return false;
     } finally {
+      if (clipboardSnapshot != null ||
+          clipboardProvider != null ||
+          primaryProvider != null) {
+        await Future<void>.delayed(_kShiftInsertRestoreDelay);
+      }
       if (clipboardProvider != null) {
-        unawaited(_cleanupSelectionProvider(clipboardProvider));
+        await _cleanupSelectionProvider(clipboardProvider, terminate: true);
       }
       if (primaryProvider != null) {
-        unawaited(_cleanupSelectionProvider(primaryProvider));
+        await _cleanupSelectionProvider(primaryProvider, terminate: true);
       }
+      await _restoreClipboardSnapshot(clipboardSnapshot);
     }
   }
 
-  Future<bool> _setClipboardText(String text) async {
-    Future<String?> readText() async {
-      final data = await Clipboard.getData(Clipboard.kTextPlain);
-      return data?.text;
+  Future<_ClipboardSnapshot?> _captureClipboardSnapshot() async {
+    if (!_restoreClipboardAfterShiftInsert) {
+      return null;
     }
 
+    try {
+      final text = await _readClipboardText();
+      _addLog(
+        text == null
+            ? 'Shift+Insert clipboard backup unavailable'
+            : 'Shift+Insert clipboard backed up',
+      );
+      return _ClipboardSnapshot(text: text);
+    } catch (e) {
+      _addLog('Shift+Insert clipboard backup failed: $e');
+      return null;
+    }
+  }
+
+  Future<void> _restoreClipboardSnapshot(_ClipboardSnapshot? snapshot) async {
+    if (snapshot == null) {
+      return;
+    }
+    if (snapshot.text == null) {
+      _addLog('Shift+Insert clipboard restore skipped: no text to restore');
+      return;
+    }
+
+    try {
+      final restored = await _setClipboardText(snapshot.text!);
+      _addLog(
+        restored
+            ? 'Shift+Insert clipboard restored'
+            : 'Shift+Insert clipboard restore not confirmed',
+      );
+    } catch (e) {
+      _addLog('Shift+Insert clipboard restore failed: $e');
+    }
+  }
+
+  Future<String?> _readClipboardText() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    return data?.text;
+  }
+
+  Future<bool> _setClipboardText(String text) async {
     for (var i = 0; i < 3; i++) {
       await Clipboard.setData(ClipboardData(text: text));
       await Future<void>.delayed(const Duration(milliseconds: 50));
-      if (await readText() == text) {
+      if (await _readClipboardText() == text) {
         return true;
       }
     }
@@ -1329,8 +1536,16 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     }
   }
 
-  Future<void> _cleanupSelectionProvider(Process process) async {
+  Future<void> _cleanupSelectionProvider(
+    Process process, {
+    bool terminate = false,
+  }) async {
     try {
+      if (terminate) {
+        process.kill(ProcessSignal.sigterm);
+        await process.exitCode.timeout(const Duration(milliseconds: 500));
+        return;
+      }
       await process.exitCode.timeout(const Duration(milliseconds: 2500));
     } on TimeoutException {
       process.kill(ProcessSignal.sigterm);
@@ -1367,18 +1582,14 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
                 const SizedBox(width: 12),
                 DropdownButton<TypeBackend>(
                   value: _typeBackend,
-                  onChanged: (TypeBackend? value) {
-                    if (value == null) {
-                      return;
-                    }
-                    setState(() {
-                      _typeBackend = value;
-                    });
-                    _addLog(
-                      'Input backend set to ${value.label} '
-                      '(effective: ${_effectiveBackendForCurrentSession().label})',
-                    );
-                  },
+                  onChanged: _settingsBusy
+                      ? null
+                      : (TypeBackend? value) {
+                          if (value == null) {
+                            return;
+                          }
+                          unawaited(_setTypeBackend(value));
+                        },
                   items: TypeBackend.values
                       .map(
                         (TypeBackend backend) => DropdownMenuItem<TypeBackend>(
@@ -1499,6 +1710,24 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
                   ? null
                   : (bool value) {
                       unawaited(_setRemovePeriodEnabled(value));
+                    },
+            ),
+            const SizedBox(height: 4),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Shift+Insert 后恢复剪贴板'),
+              subtitle: Text(
+                _settingsBusy
+                    ? '读写中...'
+                    : (_restoreClipboardAfterShiftInsert
+                        ? '已启用，粘贴后恢复原剪贴板文本'
+                        : '已关闭，Shift+Insert 会覆盖当前剪贴板文本'),
+              ),
+              value: _restoreClipboardAfterShiftInsert,
+              onChanged: _settingsBusy
+                  ? null
+                  : (bool value) {
+                      unawaited(_setShiftInsertRestoreClipboardEnabled(value));
                     },
             ),
             const SizedBox(height: 12),

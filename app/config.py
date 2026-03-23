@@ -41,6 +41,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "append_newline": False,
         "remove_period": False,
     },
+    "frontend": {
+        "restore_clipboard_after_shift_insert": True,
+    },
     "logging": {"dir": "logs", "level": "INFO"},
 }
 

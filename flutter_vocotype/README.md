@@ -27,6 +27,7 @@ If the socket is unavailable, the app auto-starts the local backend runtime.
 - Release `F2`: stop recording and transcribe
 - Recognized text is injected into the current focused app
 - `去除句号` writes `~/.config/vocotype/backend.json`
+- `Shift+Insert 后恢复剪贴板` defaults to enabled and is remembered in `~/.config/vocotype/backend.json`
 
 ## Text Input Backend
 
