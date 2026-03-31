@@ -1,4 +1,4 @@
-# VoCoType Linux
+# VoCoType Flutter
 
 Linux 离线语音输入桌面版，当前仓库仅保留 `flutter_vocotype` 前端及其运行所需的 Python 后端。
 
