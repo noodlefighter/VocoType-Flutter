@@ -19,6 +19,10 @@ vocotype-flutter
 - 可选 Rime 集成
 - 支持 `xdotool`、`wtype`、`Shift+Insert` 等文本注入方式
 
+## 界面截图
+
+![VoCoType Linux 截图](docs/images/flutter_vocotype-screenshot.png)
+
 ## 仓库结构
 
 ```text
