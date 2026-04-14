@@ -14,6 +14,94 @@ const String _kBackendConfigRelativePath = '.config/vocotype/backend.json';
 const String _kBackendRuntimeEnv = 'VOCOTYPE_BACKEND_RUNTIME';
 const bool _kDefaultRestoreClipboardAfterShiftInsert = true;
 const Duration _kShiftInsertRestoreDelay = Duration(milliseconds: 120);
+const String _kDefaultToggleHotkeyConfigValue = 'f2';
+
+class _ToggleHotkeyOption {
+  const _ToggleHotkeyOption({
+    required this.configValue,
+    required this.label,
+    required this.key,
+  });
+
+  final String configValue;
+  final String label;
+  final PhysicalKeyboardKey key;
+}
+
+const _ToggleHotkeyOption _kDefaultToggleHotkeyOption = _ToggleHotkeyOption(
+  configValue: _kDefaultToggleHotkeyConfigValue,
+  label: 'F2',
+  key: PhysicalKeyboardKey.f2,
+);
+
+const List<_ToggleHotkeyOption> _kToggleHotkeyOptions = <_ToggleHotkeyOption>[
+  _ToggleHotkeyOption(
+    configValue: 'f1',
+    label: 'F1',
+    key: PhysicalKeyboardKey.f1,
+  ),
+  _kDefaultToggleHotkeyOption,
+  _ToggleHotkeyOption(
+    configValue: 'f3',
+    label: 'F3',
+    key: PhysicalKeyboardKey.f3,
+  ),
+  _ToggleHotkeyOption(
+    configValue: 'f4',
+    label: 'F4',
+    key: PhysicalKeyboardKey.f4,
+  ),
+  _ToggleHotkeyOption(
+    configValue: 'f5',
+    label: 'F5',
+    key: PhysicalKeyboardKey.f5,
+  ),
+  _ToggleHotkeyOption(
+    configValue: 'f6',
+    label: 'F6',
+    key: PhysicalKeyboardKey.f6,
+  ),
+  _ToggleHotkeyOption(
+    configValue: 'f7',
+    label: 'F7',
+    key: PhysicalKeyboardKey.f7,
+  ),
+  _ToggleHotkeyOption(
+    configValue: 'f8',
+    label: 'F8',
+    key: PhysicalKeyboardKey.f8,
+  ),
+  _ToggleHotkeyOption(
+    configValue: 'f9',
+    label: 'F9',
+    key: PhysicalKeyboardKey.f9,
+  ),
+  _ToggleHotkeyOption(
+    configValue: 'f10',
+    label: 'F10',
+    key: PhysicalKeyboardKey.f10,
+  ),
+  _ToggleHotkeyOption(
+    configValue: 'f11',
+    label: 'F11',
+    key: PhysicalKeyboardKey.f11,
+  ),
+  _ToggleHotkeyOption(
+    configValue: 'f12',
+    label: 'F12',
+    key: PhysicalKeyboardKey.f12,
+  ),
+];
+
+_ToggleHotkeyOption _toggleHotkeyOptionForConfigValue(String? rawValue) {
+  final normalized = (rawValue ?? '').trim().toLowerCase();
+  for (final option in _kToggleHotkeyOptions) {
+    if (option.configValue == normalized) {
+      return option;
+    }
+  }
+  return _kDefaultToggleHotkeyOption;
+}
 
 int _intFromDynamic(Object? value, {int fallback = 0}) {
   if (value is int) {
@@ -238,6 +326,7 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
   bool _audioInputBusy = true;
   bool _isQuitting = false;
   TypeBackend _typeBackend = _typeBackendFromEnv();
+  String _toggleHotkeyConfigValue = _kDefaultToggleHotkeyConfigValue;
   String _lastText = '';
   List<AudioInputDevice> _audioInputDevices = const <AudioInputDevice>[];
   String? _selectedAudioDeviceName;
@@ -248,6 +337,12 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
   Process? _managedBackendProcess;
   bool _backendStartedByApp = false;
   Future<void>? _ensureBackendFuture;
+
+  _ToggleHotkeyOption get _toggleHotkeyOption {
+    return _toggleHotkeyOptionForConfigValue(_toggleHotkeyConfigValue);
+  }
+
+  String get _toggleHotkeyLabel => _toggleHotkeyOption.label;
 
   static TypeBackend _typeBackendFromEnv() {
     return TypeBackend.fromConfigValue(
@@ -261,7 +356,6 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     trayManager.addListener(this);
     windowManager.addListener(this);
     unawaited(_initDesktopBehaviors());
-    unawaited(_bindHotkey());
     unawaited(_bootstrapRuntime());
     _addLog(
       'Input backend: ${_typeBackend.label} '
@@ -371,11 +465,14 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
   }
 
   Future<void> _bootstrapRuntime() async {
+    await _loadSavedSettings();
+    try {
+      await _bindHotkey();
+    } catch (e) {
+      _addLog('Failed to register hotkey: $e');
+    }
     await _ensureBackendRunning();
-    await Future.wait<void>(<Future<void>>[
-      _loadSavedSettings(),
-      _loadAudioInputSettings(),
-    ]);
+    await _loadAudioInputSettings();
     await _ping();
   }
 
@@ -385,6 +482,16 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
       throw StateError('HOME is not set');
     }
     return File('$home/$_kBackendConfigRelativePath');
+  }
+
+  String? _resolveVenvPython(Iterable<String> runtimeDirs) {
+    for (final runtimeDir in runtimeDirs) {
+      final pythonPath = '$runtimeDir/.venv/bin/python';
+      if (File(pythonPath).existsSync()) {
+        return pythonPath;
+      }
+    }
+    return null;
   }
 
   _BackendLaunchCommand? _resolveDevBackendLaunchCommand() {
@@ -398,24 +505,22 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
       if (!File(scriptPath).existsSync()) {
         continue;
       }
-      final normalizedScriptPath =
-          File(scriptPath).absolute.resolveSymbolicLinksSync();
-      final projectDir = File(normalizedScriptPath).parent.parent.parent.path;
-      final fallbackPythonCandidates = <String>[
-        '$projectDir/.venv/bin/python',
-        '$cwd/.venv/bin/python',
-        '$cwd/../.venv/bin/python',
-      ];
-      var pythonPath = 'python3';
-      for (final candidate in fallbackPythonCandidates) {
-        if (File(candidate).existsSync()) {
-          pythonPath = candidate;
-          break;
-        }
+      final normalizedScriptPath = File(
+        scriptPath,
+      ).absolute.resolveSymbolicLinksSync();
+      final scriptDir = File(normalizedScriptPath).parent.path;
+      final projectDir = Directory(scriptDir).parent.path;
+      final pythonPath = _resolveVenvPython(<String>[
+        projectDir,
+        cwd,
+        '$cwd/..',
+      ]);
+      if (pythonPath == null) {
+        continue;
       }
       return _BackendLaunchCommand(
         pythonPath: pythonPath,
-        scriptPath: scriptPath,
+        scriptPath: normalizedScriptPath,
         runtimeDir: projectDir,
       );
     }
@@ -445,7 +550,10 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     runtimeDirs.add('${executable.parent.parent.path}/backend_runtime');
 
     for (final runtimeDir in runtimeDirs) {
-      final pythonPath = '$runtimeDir/.venv/bin/python';
+      final pythonPath = _resolveVenvPython(<String>[runtimeDir]);
+      if (pythonPath == null) {
+        continue;
+      }
       final scriptPath = '$runtimeDir/backend/backend_server.py';
       if (File(pythonPath).existsSync() && File(scriptPath).existsSync()) {
         return _BackendLaunchCommand(
@@ -524,7 +632,9 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     }
     final command = _resolveBackendLaunchCommand();
     if (command == null) {
-      _addLog('Backend launch command not found');
+      _addLog(
+        'Backend launch command not found: missing backend script or .venv/bin/python',
+      );
       return false;
     }
 
@@ -614,11 +724,15 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
       final config = await _readBackendConfigMap();
       final output = _stringDynamicMap(config['output']);
       final frontend = _stringDynamicMap(config['frontend']);
+      final hotkeys = _stringDynamicMap(config['hotkeys']);
       final removePeriodEnabled = output['remove_period'] == true;
       final restoreClipboardEnabled = _boolFromDynamic(
         frontend['restore_clipboard_after_shift_insert'],
         fallback: _kDefaultRestoreClipboardAfterShiftInsert,
       );
+      final toggleHotkeyConfigValue = _toggleHotkeyOptionForConfigValue(
+        _trimmedStringOrNull(hotkeys['toggle']),
+      ).configValue;
       final configuredMethod = _trimmedStringOrNull(output['method']);
       final backend = configuredMethod == null
           ? _typeBackend
@@ -629,12 +743,14 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
       setState(() {
         _removePeriod = removePeriodEnabled;
         _restoreClipboardAfterShiftInsert = restoreClipboardEnabled;
+        _toggleHotkeyConfigValue = toggleHotkeyConfigValue;
         _typeBackend = backend;
         _settingsBusy = false;
       });
       _addLog(
         'Settings loaded: remove_period=$removePeriodEnabled, '
         'restore_clipboard_after_shift_insert=$restoreClipboardEnabled, '
+        'toggle_hotkey=${_toggleHotkeyOption.label}, '
         'input_backend=${backend.label}',
       );
     } catch (e) {
@@ -766,6 +882,17 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     return merged;
   }
 
+  Map<String, dynamic> _mergeConfigWithToggleHotkey(
+    Map<String, dynamic> config,
+    String toggleHotkeyConfigValue,
+  ) {
+    final merged = Map<String, dynamic>.from(config);
+    final hotkeys = _stringDynamicMap(merged['hotkeys']);
+    hotkeys['toggle'] = toggleHotkeyConfigValue;
+    merged['hotkeys'] = hotkeys;
+    return merged;
+  }
+
   Future<void> _setTypeBackend(TypeBackend backend) async {
     if (_settingsBusy || backend == _typeBackend) {
       return;
@@ -800,6 +927,62 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
         _settingsBusy = false;
       });
       _addLog('Failed to update input backend: $e');
+    }
+  }
+
+  Future<void> _setToggleHotkey(String configValue) async {
+    final nextConfigValue = _toggleHotkeyOptionForConfigValue(
+      configValue,
+    ).configValue;
+    if (_settingsBusy || nextConfigValue == _toggleHotkeyConfigValue) {
+      return;
+    }
+
+    final previousConfigValue = _toggleHotkeyConfigValue;
+    setState(() {
+      _toggleHotkeyConfigValue = nextConfigValue;
+      _settingsBusy = true;
+    });
+
+    Map<String, dynamic>? previousConfig;
+    try {
+      previousConfig = await _readBackendConfigMap();
+      final merged = _mergeConfigWithToggleHotkey(
+        previousConfig,
+        nextConfigValue,
+      );
+      await _writeBackendConfigAtomically(merged);
+      await _bindHotkey();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _settingsBusy = false;
+      });
+      _addLog('Start-recognition hotkey updated: $_toggleHotkeyLabel');
+    } catch (e) {
+      if (previousConfig != null) {
+        try {
+          await _writeBackendConfigAtomically(previousConfig);
+        } catch (_) {
+          // Ignore rollback failures and continue restoring runtime state.
+        }
+      }
+
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _toggleHotkeyConfigValue = previousConfigValue;
+        _settingsBusy = false;
+      });
+
+      try {
+        await _bindHotkey();
+      } catch (restoreError) {
+        _addLog('Failed to restore previous hotkey: $restoreError');
+      }
+      _addLog('Failed to update start-recognition hotkey: $e');
     }
   }
 
@@ -1170,23 +1353,26 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
   }
 
   Future<void> _bindHotkey() async {
-    final hotKey = HotKey(
-      key: PhysicalKeyboardKey.f2,
-      scope: HotKeyScope.system,
-    );
-    _hotKey = hotKey;
+    final option = _toggleHotkeyOption;
+    final hotKey = HotKey(key: option.key, scope: HotKeyScope.system);
+
+    await _unbindHotkey();
 
     await hotKeyManager.register(
       hotKey,
-      keyDownHandler: (_) => _onF2Down(),
-      keyUpHandler: (_) => _onF2Up(),
+      keyDownHandler: (_) => _onHotkeyDown(),
+      keyUpHandler: (_) => _onHotkeyUp(),
     );
+    _hotKey = hotKey;
 
-    _addLog('Hotkey registered: F2 (system scope, hold-to-talk mode)');
+    _addLog(
+      'Hotkey registered: ${option.label} (system scope, hold-to-talk mode)',
+    );
   }
 
   Future<void> _unbindHotkey() async {
     final hotKey = _hotKey;
+    _hotKey = null;
     if (hotKey != null) {
       await hotKeyManager.unregister(hotKey);
     }
@@ -1197,11 +1383,11 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     _addLog('Daemon ping: ${ok ? 'OK' : 'FAILED'}');
   }
 
-  Future<void> _onF2Down() async {
+  Future<void> _onHotkeyDown() async {
     await _startRecording();
   }
 
-  Future<void> _onF2Up() async {
+  Future<void> _onHotkeyUp() async {
     await _stopAndTranscribe();
   }
 
@@ -1217,7 +1403,7 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     setState(() {
       _recording = true;
     });
-    _addLog('F2 down -> start recording');
+    _addLog('$_toggleHotkeyLabel down -> start recording');
 
     try {
       final resp = await _client.send(<String, dynamic>{'cmd': 'start'});
@@ -1238,7 +1424,7 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
       _recording = false;
       _busy = true;
     });
-    _addLog('F2 up -> stop and transcribe');
+    _addLog('$_toggleHotkeyLabel up -> stop and transcribe');
 
     try {
       final resp = await _client.send(<String, dynamic>{
@@ -1559,8 +1745,8 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     final status = _busy
         ? 'Recognizing'
         : (_recording
-            ? 'Recording (release F2 to stop)'
-            : 'Idle (hold F2 to talk)');
+            ? 'Recording (release $_toggleHotkeyLabel to stop)'
+            : 'Idle (hold $_toggleHotkeyLabel to talk)');
 
     return Scaffold(
       appBar: AppBar(title: const Text('Vocotype Flutter')),
@@ -1605,6 +1791,34 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
             Text(
               'Effective backend: ${_effectiveBackendForCurrentSession().label}',
             ),
+            const SizedBox(height: 12),
+            Row(
+              children: <Widget>[
+                const Expanded(child: Text('开始语音识别快捷键')),
+                const SizedBox(width: 12),
+                DropdownButton<String>(
+                  value: _toggleHotkeyConfigValue,
+                  onChanged: _settingsBusy
+                      ? null
+                      : (String? value) {
+                          if (value == null) {
+                            return;
+                          }
+                          unawaited(_setToggleHotkey(value));
+                        },
+                  items: _kToggleHotkeyOptions
+                      .map(
+                        (option) => DropdownMenuItem<String>(
+                          value: option.configValue,
+                          child: Text(option.label),
+                        ),
+                      )
+                      .toList(),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text('按住 $_toggleHotkeyLabel 开始录音，松开后停止并识别'),
             const SizedBox(height: 12),
             Row(
               children: <Widget>[
