@@ -41,6 +41,7 @@ SOCKET_PATH = "/tmp/vocotype-backend.sock"
 MAX_REQUEST_BYTES = 1024 * 1024
 REQUEST_TIMEOUT_S = 2.0
 DEFAULT_CONFIG_PATH = "~/.config/vocotype/backend.json"
+DEVICE_WATCH_INTERVAL_S = 5.0
 
 
 @dataclass
@@ -121,8 +122,16 @@ class VocotypeBackend:
         self._audio_device: int | str | None = None
         self._audio_sample_rate = DEFAULT_NATIVE_SAMPLE_RATE
         self._audio_input_channel = DEFAULT_INPUT_CHANNEL
+        self._audio_device_signature: tuple[tuple[int, str, int, int], ...] | None = None
+        self._device_watch_stop = threading.Event()
+        self._device_watch_thread = threading.Thread(
+            target=self._device_watch_loop,
+            daemon=True,
+            name="VocotypeAudioDeviceWatch",
+        )
         self._reload_audio_input_config()
         self._warmup_recorder()
+        self._device_watch_thread.start()
 
         # 注册信号处理
         signal.signal(signal.SIGTERM, self._signal_handler)
@@ -186,6 +195,50 @@ class VocotypeBackend:
             sd._initialize()
         except Exception as exc:
             logger.warning("重建音频后端失败: %s", exc)
+
+    def _audio_device_snapshot_locked(self) -> tuple[tuple[int, str, int, int], ...]:
+        snapshot = tuple(
+            (
+                int(item.get("id", 0) or 0),
+                str(item.get("name", "")),
+                int(item.get("max_input_channels", 0) or 0),
+                int(item.get("default_sample_rate", 0) or 0),
+            )
+            for item in list_input_devices(sd)
+        )
+        return snapshot
+
+    def _refresh_audio_devices_locked(self) -> bool:
+        """重建音频后端并在设备变化时更新内部状态。"""
+        if self._recording:
+            return False
+
+        previous_signature = self._audio_device_signature
+        self._reload_audio_input_config()
+        self._reset_audio_backend_locked()
+
+        current_signature = self._audio_device_snapshot_locked()
+        self._audio_device_signature = current_signature
+
+        if previous_signature == current_signature:
+            return False
+
+        recorder = self._ensure_recorder_locked()
+        try:
+            recorder.prepare()
+        except Exception as exc:
+            logger.warning("刷新音频设备预热失败: %s", exc)
+        return True
+
+    def _device_watch_loop(self) -> None:
+        while not self._device_watch_stop.wait(DEVICE_WATCH_INTERVAL_S):
+            try:
+                with self._record_lock:
+                    changed = self._refresh_audio_devices_locked()
+                if changed:
+                    logger.info("检测到音频设备变化，已刷新设备状态")
+            except Exception as exc:
+                logger.warning("音频设备监测失败: %s", exc)
 
     def _build_recorder(self) -> AudioRecorder:
         return AudioRecorder(
@@ -255,8 +308,7 @@ class VocotypeBackend:
     def _list_audio_inputs(self) -> dict:
         with self._record_lock:
             if not self._recording:
-                self._reload_audio_input_config()
-                self._reset_audio_backend_locked()
+                self._refresh_audio_devices_locked()
         return {
             "ok": True,
             "devices": list_input_devices(sd),
@@ -633,6 +685,9 @@ class VocotypeBackend:
     def cleanup(self):
         """清理资源"""
         logger.info("正在清理资源...")
+        self._device_watch_stop.set()
+        if self._device_watch_thread.is_alive():
+            self._device_watch_thread.join(timeout=2.0)
         try:
             if self._recorder is not None:
                 self._recorder.cleanup()

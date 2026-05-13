@@ -14,6 +14,7 @@ const String _kBackendConfigRelativePath = '.config/vocotype/backend.json';
 const String _kBackendRuntimeEnv = 'VOCOTYPE_BACKEND_RUNTIME';
 const bool _kDefaultRestoreClipboardAfterShiftInsert = true;
 const Duration _kShiftInsertRestoreDelay = Duration(milliseconds: 120);
+const Duration _kAudioInputRefreshInterval = Duration(seconds: 5);
 const String _kDefaultToggleHotkeyConfigValue = 'f2';
 
 class _ToggleHotkeyOption {
@@ -337,6 +338,7 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
   Process? _managedBackendProcess;
   bool _backendStartedByApp = false;
   Future<void>? _ensureBackendFuture;
+  Timer? _audioInputRefreshTimer;
 
   _ToggleHotkeyOption get _toggleHotkeyOption {
     return _toggleHotkeyOptionForConfigValue(_toggleHotkeyConfigValue);
@@ -357,6 +359,15 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
     windowManager.addListener(this);
     unawaited(_initDesktopBehaviors());
     unawaited(_bootstrapRuntime());
+    _audioInputRefreshTimer = Timer.periodic(
+      _kAudioInputRefreshInterval,
+      (_) {
+        if (!mounted || _audioInputBusy) {
+          return;
+        }
+        unawaited(_loadAudioInputSettings(showBusy: false));
+      },
+    );
     _addLog(
       'Input backend: ${_typeBackend.label} '
       '(effective: ${_effectiveBackendForCurrentSession().label})',
@@ -367,6 +378,8 @@ class _HomePageState extends State<HomePage> with TrayListener, WindowListener {
   void dispose() {
     trayManager.removeListener(this);
     windowManager.removeListener(this);
+    _audioInputRefreshTimer?.cancel();
+    _audioInputRefreshTimer = null;
     unawaited(_unbindHotkey());
     _managedBackendProcess = null;
     super.dispose();
