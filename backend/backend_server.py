@@ -170,6 +170,23 @@ class VocotypeBackend:
         self._audio_sample_rate = sample_rate
         self._audio_input_channel = input_channel
 
+    def _reset_audio_backend_locked(self) -> None:
+        """重建 sounddevice/PortAudio 状态，确保重新枚举热插拔设备。"""
+        recorder = self._recorder
+        if recorder is not None:
+            recorder.cleanup()
+            self._recorder = None
+
+        try:
+            sd._terminate()
+        except Exception as exc:
+            logger.warning("终止音频后端失败: %s", exc)
+
+        try:
+            sd._initialize()
+        except Exception as exc:
+            logger.warning("重建音频后端失败: %s", exc)
+
     def _build_recorder(self) -> AudioRecorder:
         return AudioRecorder(
             device=self._audio_device,
@@ -236,7 +253,10 @@ class VocotypeBackend:
         return state
 
     def _list_audio_inputs(self) -> dict:
-        self._reload_audio_input_config()
+        with self._record_lock:
+            if not self._recording:
+                self._reload_audio_input_config()
+                self._reset_audio_backend_locked()
         return {
             "ok": True,
             "devices": list_input_devices(sd),
