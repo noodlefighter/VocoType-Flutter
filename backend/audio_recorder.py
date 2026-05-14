@@ -130,10 +130,10 @@ class AudioRecorder:
 
     def prepare(self) -> None:
         """预热输入流，避免首轮录音时重新打开设备。"""
-        if self.stream is not None and getattr(self.stream, "active", False):
-            return
+        # 预热目标是提前完成设备解析与流对象构建；
+        # 空闲时不保持 active，降低 USB 设备热拔出触发 PortAudio/ALSA 崩溃概率。
         if self.stream is not None:
-            self.cleanup()
+            return
 
         device = self._resolve_input_device()
         input_channel = self._resolve_input_channel(device)
@@ -176,18 +176,34 @@ class AudioRecorder:
             dtype='int16',
             callback=audio_callback,
         )
-        self.stream.start()
-        logger.info("音频输入流已预热")
+        logger.info("音频输入流已预热（待启动）")
 
     def start(self) -> None:
         """开始录音（非阻塞）"""
         self.prepare()
+
+        stream = self.stream
+        if stream is None:
+            raise RuntimeError("音频输入流不可用")
 
         with self._state_lock:
             self.audio_frames.clear()
             self._recording = True
             self._record_started_at = time.perf_counter()
             self._first_frame_logged = False
+
+        try:
+            if not getattr(stream, "active", False):
+                stream.start()
+        except Exception as exc:
+            with self._state_lock:
+                self._recording = False
+                self._record_started_at = None
+                self._first_frame_logged = False
+                self.audio_frames.clear()
+            # 启动失败时直接清理，避免保留异常句柄影响后续重试。
+            self.cleanup()
+            raise RuntimeError(f"启动输入流失败: {exc}") from exc
 
         logger.info("开始录音...")
 
@@ -204,6 +220,14 @@ class AudioRecorder:
             self._first_frame_logged = False
             frames = self.audio_frames
             self.audio_frames = []
+
+        # 录音结束后立即停流，避免空闲态下 USB 热拔出触发 PortAudio 内部崩溃。
+        try:
+            if self.stream is not None and getattr(self.stream, "active", False):
+                self.stream.stop()
+        except Exception as exc:
+            logger.warning("停止输入流失败，重建流: %s", exc)
+            self.cleanup()
 
         logger.info("录音完成，共 %d 帧", len(frames))
 
@@ -250,7 +274,8 @@ class AudioRecorder:
             return
 
         try:
-            stream.stop()
+            if getattr(stream, "active", False):
+                stream.abort()
         except Exception:
             pass
         try:

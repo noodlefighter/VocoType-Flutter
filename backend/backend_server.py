@@ -42,6 +42,7 @@ MAX_REQUEST_BYTES = 1024 * 1024
 REQUEST_TIMEOUT_S = 2.0
 DEFAULT_CONFIG_PATH = "~/.config/vocotype/backend.json"
 DEVICE_WATCH_INTERVAL_S = 5.0
+AUDIO_RELOAD_MAX_RETRIES = 3
 
 
 @dataclass
@@ -123,6 +124,9 @@ class VocotypeBackend:
         self._audio_sample_rate = DEFAULT_NATIVE_SAMPLE_RATE
         self._audio_input_channel = DEFAULT_INPUT_CHANNEL
         self._audio_device_signature: tuple[tuple[int, str, int, int], ...] | None = None
+        self._system_audio_signature: tuple[str, ...] | None = None
+        self._audio_reload_pending = False
+        self._audio_reload_retries_left = 0
         self._device_watch_stop = threading.Event()
         self._device_watch_thread = threading.Thread(
             target=self._device_watch_loop,
@@ -131,6 +135,9 @@ class VocotypeBackend:
         )
         self._reload_audio_input_config()
         self._warmup_recorder()
+        with self._record_lock:
+            self._audio_device_signature = self._capture_audio_device_signature_locked()
+            self._system_audio_signature = self._capture_system_audio_signature()
         self._device_watch_thread.start()
 
         # 注册信号处理
@@ -179,6 +186,40 @@ class VocotypeBackend:
         self._audio_sample_rate = sample_rate
         self._audio_input_channel = input_channel
 
+    def _capture_audio_device_signature_locked(self) -> tuple[tuple[int, str, int, int], ...]:
+        return tuple(
+            (
+                int(item.get("id", 0) or 0),
+                str(item.get("name", "")),
+                int(item.get("max_input_channels", 0) or 0),
+                int(item.get("default_sample_rate", 0) or 0),
+            )
+            for item in list_input_devices(sd)
+        )
+
+    def _capture_system_audio_signature(self) -> tuple[str, ...] | None:
+        """捕获系统层设备签名（Linux），用于检测 PortAudio 缓存外的热插拔变化。"""
+        if not sys.platform.startswith("linux"):
+            return None
+
+        signature_parts: list[str] = []
+        for path in ("/proc/asound/cards", "/proc/asound/devices"):
+            try:
+                with open(path, "rb") as handle:
+                    content = handle.read()
+                signature_parts.append(f"{path}:{content.decode('utf-8', errors='ignore')}")
+            except OSError as exc:
+                signature_parts.append(f"{path}:<error:{exc.__class__.__name__}>")
+
+        for path in ("/dev/snd/by-id", "/dev/snd"):
+            try:
+                names = sorted(entry.name for entry in os.scandir(path))
+                signature_parts.append(f"{path}:{'|'.join(names)}")
+            except OSError as exc:
+                signature_parts.append(f"{path}:<error:{exc.__class__.__name__}>")
+
+        return tuple(signature_parts)
+
     def _reset_audio_backend_locked(self) -> None:
         """重建 sounddevice/PortAudio 状态，确保重新枚举热插拔设备。"""
         recorder = self._recorder
@@ -196,47 +237,86 @@ class VocotypeBackend:
         except Exception as exc:
             logger.warning("重建音频后端失败: %s", exc)
 
-    def _audio_device_snapshot_locked(self) -> tuple[tuple[int, str, int, int], ...]:
-        snapshot = tuple(
-            (
-                int(item.get("id", 0) or 0),
-                str(item.get("name", "")),
-                int(item.get("max_input_channels", 0) or 0),
-                int(item.get("default_sample_rate", 0) or 0),
-            )
-            for item in list_input_devices(sd)
-        )
-        return snapshot
-
     def _refresh_audio_devices_locked(self) -> bool:
-        """重建音频后端并在设备变化时更新内部状态。"""
-        if self._recording:
-            return False
-
-        previous_signature = self._audio_device_signature
+        """完全重建音频后端，并刷新录音器状态。"""
         self._reload_audio_input_config()
         self._reset_audio_backend_locked()
-
-        current_signature = self._audio_device_snapshot_locked()
-        self._audio_device_signature = current_signature
-
-        if previous_signature == current_signature:
-            return False
-
         recorder = self._ensure_recorder_locked()
         try:
             recorder.prepare()
         except Exception as exc:
             logger.warning("刷新音频设备预热失败: %s", exc)
+        self._audio_device_signature = self._capture_audio_device_signature_locked()
+        self._system_audio_signature = self._capture_system_audio_signature()
         return True
+
+    def _schedule_audio_reload_locked(self) -> None:
+        self._audio_reload_pending = True
+        self._audio_reload_retries_left = AUDIO_RELOAD_MAX_RETRIES
+
+    def _attempt_pending_audio_reload_locked(self) -> tuple[bool, bool]:
+        """
+        尝试执行挂起的音频重载。
+        返回:
+            (reloaded, changed)
+            reloaded: 本次是否执行了重载
+            changed: 重载后 PortAudio 设备签名是否发生变化
+        """
+        if not self._audio_reload_pending or self._recording:
+            return False, False
+
+        previous_signature = self._audio_device_signature
+        self._refresh_audio_devices_locked()
+        changed = previous_signature != self._audio_device_signature
+        if changed:
+            self._audio_reload_pending = False
+            self._audio_reload_retries_left = 0
+            return True, True
+
+        if self._audio_reload_retries_left > 0:
+            self._audio_reload_retries_left -= 1
+            self._audio_reload_pending = True
+            return True, False
+
+        self._audio_reload_pending = False
+        return True, False
 
     def _device_watch_loop(self) -> None:
         while not self._device_watch_stop.wait(DEVICE_WATCH_INTERVAL_S):
             try:
+                refreshed = False
+                deferred = False
+                changed = False
+                exhausted = False
+                system_signature = self._capture_system_audio_signature()
                 with self._record_lock:
-                    changed = self._refresh_audio_devices_locked()
-                if changed:
+                    if system_signature is None:
+                        current_signature = self._capture_audio_device_signature_locked()
+                        previous_signature = self._audio_device_signature
+                        if previous_signature != current_signature:
+                            self._schedule_audio_reload_locked()
+                    else:
+                        previous_system_signature = self._system_audio_signature
+                        if previous_system_signature != system_signature:
+                            self._system_audio_signature = system_signature
+                            self._schedule_audio_reload_locked()
+
+                    if self._audio_reload_pending and self._recording:
+                        deferred = True
+                    else:
+                        refreshed, changed = self._attempt_pending_audio_reload_locked()
+                        exhausted = refreshed and not changed and not self._audio_reload_pending
+                if refreshed and changed:
                     logger.info("检测到音频设备变化，已刷新设备状态")
+                elif refreshed and self._audio_reload_pending:
+                    logger.info(
+                        "检测到音频设备变化，PortAudio 设备列表暂未更新，将继续重试（剩余 %d 次）",
+                        self._audio_reload_retries_left,
+                    )
+                elif exhausted:
+                    logger.warning("音频设备重载重试耗尽，保持当前可用输入设备")
+                elif deferred:
+                    logger.info("检测到音频设备变化，等待录音结束后完整重载")
             except Exception as exc:
                 logger.warning("音频设备监测失败: %s", exc)
 
@@ -307,13 +387,17 @@ class VocotypeBackend:
 
     def _list_audio_inputs(self) -> dict:
         with self._record_lock:
-            if not self._recording:
-                self._refresh_audio_devices_locked()
+            if self._audio_reload_pending and not self._recording:
+                try:
+                    self._attempt_pending_audio_reload_locked()
+                except Exception as exc:
+                    logger.warning("列出设备前重载音频设备失败: %s", exc)
+            current_recording = self._recording
         return {
             "ok": True,
             "devices": list_input_devices(sd),
             "current": self._current_audio_input_state(),
-            "recording": self._recording,
+            "recording": current_recording,
         }
 
     def _set_audio_input(self, request: dict) -> dict:
@@ -648,12 +732,25 @@ class VocotypeBackend:
             return {"ok": False, "error": f"stop_failed: {exc}"}
 
         if not transcribe:
+            with self._record_lock:
+                if self._audio_reload_pending:
+                    try:
+                        self._attempt_pending_audio_reload_locked()
+                    except Exception as exc:
+                        logger.warning("录音结束后重载音频设备失败: %s", exc)
             if audio_path:
                 try:
                     os.remove(audio_path)
                 except OSError:
                     pass
             return {"ok": True, "recording": False}
+
+        with self._record_lock:
+            if self._audio_reload_pending:
+                try:
+                    self._attempt_pending_audio_reload_locked()
+                except Exception as exc:
+                    logger.warning("录音结束后重载音频设备失败: %s", exc)
 
         if audio_path is None:
             return {"ok": False, "error": "no_audio"}
